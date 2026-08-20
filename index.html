@@ -801,6 +801,64 @@
     white-space: nowrap;
   }
 
+  .admin-panel { max-width: 720px; margin: 0 auto; padding: 28px 24px; }
+  .admin-list {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 20px;
+  }
+  .admin-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .admin-row:last-child { border-bottom: none; }
+  .admin-row-email {
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-weight: 500;
+    font-size: 13.5px;
+  }
+  .admin-row-meta {
+    font-size: 11.5px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .situacao-pill {
+    display: inline-flex;
+    align-items: center;
+    font-size: 10.5px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    color: white;
+    font-weight: 500;
+    margin-left: 6px;
+  }
+  .admin-edit-btn {
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--ink);
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .quick-date-row { display: flex; gap: 8px; margin-top: 8px; }
+  .quick-date-btn {
+    font-size: 11.5px;
+    padding: 5px 11px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--muted);
+    cursor: pointer;
+  }
+
   ::-webkit-scrollbar { width: 8px; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
 </style>
@@ -811,7 +869,7 @@
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
   import {
-    getFirestore, collection, doc, onSnapshot, query, orderBy, updateDoc, getDocs, setDoc, serverTimestamp
+    getFirestore, collection, doc, onSnapshot, query, where, orderBy, updateDoc, getDocs, setDoc, serverTimestamp
   } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
   import {
     getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, signOut
@@ -832,7 +890,7 @@
   const auth = getAuth(app);
 
   window.__wcrmFirebase = {
-    db, collection, doc, onSnapshot, query, orderBy, updateDoc, getDocs, setDoc, serverTimestamp,
+    db, collection, doc, onSnapshot, query, where, orderBy, updateDoc, getDocs, setDoc, serverTimestamp,
     auth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, signOut,
   };
   window.dispatchEvent(new Event("wcrm-firebase-ready"));
@@ -1737,6 +1795,240 @@ function ZapiConnect({ fb }) {
   );
 }
 
+const ADMIN_EMAIL = "scorsesolution@gmail.com";
+
+const SITUACAO_LABELS = {
+  pendente: "Pendente",
+  em_teste: "Em teste",
+  ativa: "Ativa",
+  em_renovacao: "Em renovação",
+  expirada: "Expirada",
+};
+
+const SITUACAO_COLORS = {
+  pendente: "var(--muted)",
+  em_teste: "var(--accent)",
+  ativa: "var(--primary)",
+  em_renovacao: "#C1502E",
+  expirada: "var(--perdido)",
+};
+
+function formatDateInput(date) {
+  if (!date) return "";
+  const d = toDate(date) || date;
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function addToDate(dateStr, amount, unit) {
+  const base = dateStr ? new Date(dateStr + "T00:00:00") : new Date();
+  if (unit === "month") base.setMonth(base.getMonth() + amount);
+  if (unit === "year") base.setFullYear(base.getFullYear() + amount);
+  return formatDateInput(base);
+}
+
+function ClientAccessForm({ fb, initial, onClose, onSaved }) {
+  const [email, setEmail] = useState(initial?.email || "");
+  const [instanceId, setInstanceId] = useState(initial?.zapiInstanceId || "");
+  const [instanceToken, setInstanceToken] = useState(initial?.zapiToken || "");
+  const [accessUntil, setAccessUntil] = useState(formatDateInput(initial?.accessUntil));
+  const [situacao, setSituacao] = useState(initial?.situacao || "pendente");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError("");
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail) { setError("Informe o e-mail da cliente."); return; }
+
+    setSaving(true);
+    try {
+      const { db, collection, doc, setDoc, getDocs, query, where } = fb;
+      const accessUntilDate = accessUntil ? new Date(accessUntil + "T23:59:59") : null;
+
+      // Já existe como cliente (já se cadastrou e/ou conectou)? Atualiza direto na ficha dela.
+      const clientsRef = collection(db, "clients");
+      const existingQuery = await getDocs(query(clientsRef, where("email", "==", cleanEmail)));
+
+      if (!existingQuery.empty) {
+        const clientDoc = existingQuery.docs[0];
+        await setDoc(
+          clientDoc.ref,
+          {
+            situacao,
+            ...(accessUntilDate ? { accessUntil: accessUntilDate } : {}),
+            ...(instanceId ? { zapiInstanceId: instanceId } : {}),
+            ...(instanceToken ? { zapiToken: instanceToken } : {}),
+          },
+          { merge: true }
+        );
+      }
+
+      // Sempre atualiza também a reserva por e-mail (pendingAccess) — é o que
+      // é usado se ela ainda não conectou, ou serve de registro histórico.
+      const pendingRef = doc(collection(db, "pendingAccess"), cleanEmail);
+      await setDoc(
+        pendingRef,
+        {
+          instanceId,
+          instanceToken,
+          situacao,
+          ...(accessUntilDate ? { accessUntil: accessUntilDate } : {}),
+          // Não sobrescreve o status de "claimed" se já foi usada — só define
+          // como pending se for um registro novo.
+          ...(existingQuery.empty ? { status: "pending" } : {}),
+        },
+        { merge: true }
+      );
+
+      onSaved();
+    } catch (err) {
+      console.error("Erro ao salvar acesso da cliente:", err);
+      setError("Não consegui salvar. Tenta de novo.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <form className="modal-card" onClick={(e) => e.stopPropagation()} onSubmit={handleSubmit}>
+        <p className="modal-title">{initial ? "Editar acesso" : "Liberar / renovar cliente"}</p>
+
+        <div className="login-field">
+          <label className="login-label">E-mail da cliente</label>
+          <input
+            className="login-input"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            disabled={!!initial}
+            required
+          />
+        </div>
+
+        <div className="login-field">
+          <label className="login-label">ID da instância Z-API</label>
+          <input className="login-input" value={instanceId} onChange={(e) => setInstanceId(e.target.value)} />
+        </div>
+
+        <div className="login-field">
+          <label className="login-label">Token da instância Z-API</label>
+          <input className="login-input" value={instanceToken} onChange={(e) => setInstanceToken(e.target.value)} />
+        </div>
+
+        <div className="login-field">
+          <label className="login-label">Acesso até</label>
+          <input
+            className="login-input"
+            type="date"
+            value={accessUntil}
+            onChange={(e) => setAccessUntil(e.target.value)}
+          />
+          <div className="quick-date-row">
+            <button type="button" className="quick-date-btn" onClick={() => setAccessUntil(addToDate(accessUntil, 1, "month"))}>+1 mês</button>
+            <button type="button" className="quick-date-btn" onClick={() => setAccessUntil(addToDate(accessUntil, 3, "month"))}>+3 meses</button>
+            <button type="button" className="quick-date-btn" onClick={() => setAccessUntil(addToDate(accessUntil, 1, "year"))}>+1 ano</button>
+          </div>
+        </div>
+
+        <div className="login-field">
+          <label className="login-label">Situação</label>
+          <select className="login-input" value={situacao} onChange={(e) => setSituacao(e.target.value)} style={{ cursor: "pointer" }}>
+            {Object.entries(SITUACAO_LABELS).map(([key, label]) => (
+              <option key={key} value={key}>{label}</option>
+            ))}
+          </select>
+        </div>
+
+        {error && <p className="login-error">{error}</p>}
+
+        <div className="modal-actions">
+          <button type="button" className="modal-btn-secondary" onClick={onClose}>Cancelar</button>
+          <button type="submit" className="modal-btn-primary" disabled={saving}>
+            {saving ? "Salvando…" : "Salvar acesso"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function AdminPanel({ fb }) {
+  const [clients, setClients] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null); // null = fechado, {} = novo, {...} = editando
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    if (!fb) return;
+    const { db, collection, getDocs } = fb;
+    setLoading(true);
+    getDocs(collection(db, "clients"))
+      .then((snap) => {
+        setClients(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error("Erro ao carregar clientes:", err);
+        setLoading(false);
+      });
+  }, [fb, refreshKey]);
+
+  function refresh() {
+    setEditing(null);
+    setRefreshKey((k) => k + 1);
+  }
+
+  return (
+    <div className="admin-panel">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+        <p style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: "16px", margin: 0 }}>
+          👑 Painel da dona
+        </p>
+        <button className="add-contact-btn" onClick={() => setEditing({})}>+ Liberar cliente</button>
+      </div>
+
+      <div className="admin-list">
+        {loading && <div className="empty-list">Carregando…</div>}
+        {!loading && clients.length === 0 && <div className="empty-list">Nenhuma cliente cadastrada ainda.</div>}
+        {!loading && clients.map((c) => {
+          const situacao = c.situacao || "pendente";
+          return (
+            <div className="admin-row" key={c.id}>
+              <div>
+                <div className="admin-row-email">
+                  {c.email || c.id}
+                  <span className="situacao-pill" style={{ background: SITUACAO_COLORS[situacao] }}>
+                    {SITUACAO_LABELS[situacao]}
+                  </span>
+                </div>
+                <div className="admin-row-meta">
+                  {c.accessUntil ? `até ${formatDateShort(toDate(c.accessUntil))}` : "sem data definida"}
+                  {c.zapiInstanceId ? " · WhatsApp configurado" : " · sem instância"}
+                </div>
+              </div>
+              <button className="admin-edit-btn" onClick={() => setEditing(c)}>Editar</button>
+            </div>
+          );
+        })}
+      </div>
+
+      {editing && (
+        <ClientAccessForm
+          fb={fb}
+          initial={editing.id ? editing : null}
+          onClose={() => setEditing(null)}
+          onSaved={refresh}
+        />
+      )}
+    </div>
+  );
+}
+
 function Dashboard({ fb, clientId, userEmail, onLogout }) {
   const [view, setView] = useState("report"); // 'report' | 'overview'
   const [search, setSearch] = useState("");
@@ -1849,6 +2141,11 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
           <div className={`nav-item${view === "zapi" ? " active" : ""}`} onClick={() => goToView("zapi")}>
             <span className="nav-icon">⚡</span> Conectar WhatsApp
           </div>
+          {userEmail === ADMIN_EMAIL && (
+            <div className={`nav-item${view === "admin" ? " active" : ""}`} onClick={() => goToView("admin")}>
+              <span className="nav-icon">👑</span> Painel da dona
+            </div>
+          )}
         </div>
         <div className="nav-footer">
           <span style={{ fontSize: "11px", color: "var(--muted)", display: "block", marginBottom: "4px" }}>
@@ -1950,7 +2247,7 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
               <Overview contacts={dateFilteredContacts} fb={fb} clientId={clientId} />
             </div>
           </React.Fragment>
-        ) : (
+        ) : view === "zapi" ? (
           <React.Fragment>
             <div className="main-toolbar" style={{ flexDirection: "row", alignItems: "center" }}>
               <button className="back-btn" onClick={backToMenu}>←</button>
@@ -1958,6 +2255,15 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
             </div>
             <div className="main-body">
               <ZapiConnect fb={fb} />
+            </div>
+          </React.Fragment>
+        ) : (
+          <React.Fragment>
+            <div className="main-toolbar" style={{ flexDirection: "row", alignItems: "center" }}>
+              <button className="back-btn" onClick={backToMenu}>←</button>
+            </div>
+            <div className="main-body">
+              <AdminPanel fb={fb} />
             </div>
           </React.Fragment>
         )}
@@ -2107,6 +2413,17 @@ function App() {
     const unsub = fb.onAuthStateChanged(fb.auth, (u) => setUser(u || null));
     return () => unsub();
   }, [fb]);
+
+  // Garante que o e-mail está salvo no próprio documento do cliente —
+  // usado pelo Painel da dona pra listar quem é quem.
+  useEffect(() => {
+    if (!fb || !user) return;
+    const { db, collection, doc, setDoc } = fb;
+    const clientRef = doc(collection(db, "clients"), user.uid);
+    setDoc(clientRef, { email: (user.email || "").toLowerCase() }, { merge: true }).catch((err) =>
+      console.error("Erro ao salvar e-mail do cliente:", err)
+    );
+  }, [fb, user]);
 
   function handleLogout() {
     if (fb) fb.signOut(fb.auth);
