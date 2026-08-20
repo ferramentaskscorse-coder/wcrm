@@ -1642,8 +1642,19 @@ function ZapiConnect({ fb }) {
     setLoading(true);
     try {
       const data = await callZapiFunction(fb, "wcrmZapiAutoConnect");
-      setQrCode(data.qrCode);
-      setConnected(false);
+      if (data.qrCode) {
+        setQrCode(data.qrCode);
+        setConnected(false);
+      } else {
+        // Sem QR Code — provavelmente essa instância já está conectada. Confirma o status.
+        const statusData = await callZapiFunction(fb, "wcrmZapiStatus");
+        if (statusData.connected) {
+          setConnected(true);
+          setQrCode(null);
+        } else {
+          setError("Não recebemos o QR Code. Clica em conectar de novo em alguns segundos.");
+        }
+      }
     } catch (err) {
       console.error("Erro ao conectar:", err);
       setError(err.message || "Não consegui conectar. Tenta de novo em alguns segundos.");
