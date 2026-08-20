@@ -814,7 +814,7 @@
     getFirestore, collection, doc, onSnapshot, query, orderBy, updateDoc, getDocs, setDoc, serverTimestamp
   } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
   import {
-    getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut
+    getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, signOut
   } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 
   // Configuração do projeto Firebase do WCRM
@@ -833,7 +833,7 @@
 
   window.__wcrmFirebase = {
     db, collection, doc, onSnapshot, query, orderBy, updateDoc, getDocs, setDoc, serverTimestamp,
-    auth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut,
+    auth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, signOut,
   };
   window.dispatchEvent(new Event("wcrm-firebase-ready"));
 </script>
@@ -1964,17 +1964,31 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
 }
 
 function Login({ fb }) {
-  const [mode, setMode] = useState("login"); // 'login' | 'signup'
+  const [mode, setMode] = useState("login"); // 'login' | 'signup' | 'reset'
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
   const [loading, setLoading] = useState(false);
 
   function handleSubmit(e) {
     e.preventDefault();
     if (!fb) return;
     setError("");
+    setInfo("");
     setLoading(true);
+
+    if (mode === "reset") {
+      fb.sendPasswordResetEmail(fb.auth, email)
+        .then(() => setInfo("Te mandamos um e-mail com o link pra criar uma senha nova. Confere também a caixa de spam."))
+        .catch((err) => {
+          console.error("Erro ao enviar e-mail de redefinição:", err);
+          if (err.code === "auth/invalid-email") setError("E-mail inválido.");
+          else setError("Não consegui enviar o e-mail. Confere se digitou certo.");
+        })
+        .finally(() => setLoading(false));
+      return;
+    }
 
     const action =
       mode === "signup"
@@ -1990,6 +2004,8 @@ function Login({ fb }) {
           setError("A senha precisa ter pelo menos 6 caracteres.");
         } else if (err.code === "auth/invalid-email") {
           setError("E-mail inválido.");
+        } else if (err.code === "auth/invalid-credential" || err.code === "auth/wrong-password" || err.code === "auth/user-not-found") {
+          setError("E-mail ou senha incorretos.");
         } else {
           setError(mode === "signup" ? "Não consegui criar sua conta." : "E-mail ou senha incorretos.");
         }
@@ -2002,7 +2018,7 @@ function Login({ fb }) {
       <form className="login-card" onSubmit={handleSubmit}>
         <p className="login-brand">WCRM</p>
         <p className="login-sub">
-          {mode === "signup" ? "Cria sua conta pra começar" : "Entre pra ver suas conversas do WhatsApp"}
+          {mode === "signup" ? "Cria sua conta pra começar" : mode === "reset" ? "Recupera o acesso à sua conta" : "Entre pra ver suas conversas do WhatsApp"}
         </p>
         <div className="login-field">
           <label className="login-label">E-mail</label>
@@ -2015,31 +2031,46 @@ function Login({ fb }) {
             autoFocus
           />
         </div>
-        <div className="login-field">
-          <label className="login-label">Senha</label>
-          <input
-            className="login-input"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            minLength={6}
-          />
-        </div>
+        {mode !== "reset" && (
+          <div className="login-field">
+            <label className="login-label">Senha</label>
+            <input
+              className="login-input"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={6}
+            />
+          </div>
+        )}
         <button className="login-btn" type="submit" disabled={loading}>
-          {loading ? "Aguarda…" : mode === "signup" ? "Criar conta" : "Entrar"}
+          {loading ? "Aguarda…" : mode === "signup" ? "Criar conta" : mode === "reset" ? "Enviar link de redefinição" : "Entrar"}
         </button>
         {error && <p className="login-error">{error}</p>}
+        {info && <p style={{ fontSize: "12px", color: "var(--primary)", textAlign: "center", marginTop: "10px" }}>{info}</p>}
+
+        {mode === "login" && (
+          <p style={{ textAlign: "center", fontSize: "12px", marginTop: "10px" }}>
+            <span className="logout-btn" onClick={() => { setMode("reset"); setError(""); setInfo(""); }}>Esqueci minha senha</span>
+          </p>
+        )}
+
         <p style={{ textAlign: "center", fontSize: "12px", color: "var(--muted)", marginTop: "16px" }}>
           {mode === "signup" ? (
             <React.Fragment>
               Já tem conta?{" "}
-              <span className="logout-btn" onClick={() => { setMode("login"); setError(""); }}>Entrar</span>
+              <span className="logout-btn" onClick={() => { setMode("login"); setError(""); setInfo(""); }}>Entrar</span>
+            </React.Fragment>
+          ) : mode === "reset" ? (
+            <React.Fragment>
+              Lembrou a senha?{" "}
+              <span className="logout-btn" onClick={() => { setMode("login"); setError(""); setInfo(""); }}>Entrar</span>
             </React.Fragment>
           ) : (
             <React.Fragment>
               Ainda não tem conta?{" "}
-              <span className="logout-btn" onClick={() => { setMode("signup"); setError(""); }}>Criar conta</span>
+              <span className="logout-btn" onClick={() => { setMode("signup"); setError(""); setInfo(""); }}>Criar conta</span>
             </React.Fragment>
           )}
         </p>
