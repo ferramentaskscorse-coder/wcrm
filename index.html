@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>WCRM — Painel</title>
+<title>Trilha — Painel</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -1786,7 +1786,7 @@ function ZapiConnect({ fb }) {
 
       {connected && (
         <p style={{ fontSize: "13px", color: "var(--muted)" }}>
-          Seu WhatsApp está conectado ao WCRM. As próximas mensagens já vão aparecer no Relatório automaticamente.
+          Seu WhatsApp está conectado ao Trilha. As próximas mensagens já vão aparecer no Relatório automaticamente.
           Conversas de antes de conectar não são importadas automaticamente — se quiser trazer um lead antigo,
           cadastra ele manualmente no Relatório.
         </p>
@@ -2128,7 +2128,7 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
     <div className="app">
       <div className={`sidebar${mobileShowMain ? " hide-mobile" : ""}`}>
         <div className="sidebar-header">
-          <p className="brand">WCRM</p>
+          <p className="brand">Trilha</p>
           <p className="brand-sub">Suas conversas do WhatsApp, organizadas.</p>
         </div>
         <div className="nav-menu">
@@ -2334,7 +2334,7 @@ function Login({ fb }) {
   return (
     <div className="login-screen">
       <form className="login-card" onSubmit={handleSubmit}>
-        <p className="login-brand">WCRM</p>
+        <p className="login-brand">Trilha</p>
         <p className="login-sub">
           {mode === "signup" ? "Cria sua conta pra começar" : mode === "reset" ? "Recupera o acesso à sua conta" : "Entre pra ver suas conversas do WhatsApp"}
         </p>
