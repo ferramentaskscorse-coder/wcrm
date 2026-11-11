@@ -388,6 +388,12 @@
     align-self: flex-start;
     border-bottom-left-radius: 4px;
   }
+  .bubble.me {
+    align-self: flex-end;
+    background: color-mix(in srgb, var(--primary) 12%, var(--surface));
+    border-bottom-left-radius: 14px;
+    border-bottom-right-radius: 4px;
+  }
   .bubble-time {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 10px;
@@ -1055,10 +1061,11 @@ function ContactRow({ contact, selected, onClick }) {
 
 function MessageBubble({ message }) {
   const time = formatClock(toDate(message.timestamp));
+  const cls = message.fromMe ? "bubble me" : "bubble";
 
   if (message.messageType === "audio") {
     return (
-      <div className="bubble">
+      <div className={cls}>
         <div className="bubble-audio">
           <span>🎤</span>
           <audio controls src={message.audioUrl}></audio>
@@ -1069,7 +1076,7 @@ function MessageBubble({ message }) {
   }
 
   return (
-    <div className="bubble">
+    <div className={cls}>
       <div>{message.text}</div>
       <div className="bubble-time">{time}</div>
     </div>
@@ -1283,7 +1290,8 @@ function useWordFrequency(fb, clientId, contacts) {
             const snap = await getDocs(messagesRef);
             snap.forEach((docSnap) => {
               const m = docSnap.data();
-              if (m.messageType !== "text" || !m.text) return;
+              // A nuvem mostra o que as LEADS falam — mensagens enviadas por você ficam de fora.
+              if (m.fromMe || m.messageType !== "text" || !m.text) return;
               const words = m.text.split(/[^\p{L}]+/u).filter(Boolean);
               words.forEach((raw) => {
                 const normalized = normalizeWord(raw);
