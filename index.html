@@ -1412,11 +1412,21 @@ function Overview({ contacts, fb, clientId }) {
   );
 }
 
+const SOURCE_LABELS = {
+  whatsapp: "WhatsApp",
+  instagram: "Instagram",
+  tiktok: "TikTok",
+  facebook: "Facebook",
+  indicacao: "Indicação",
+  outro: "Outro",
+};
+
 function NewContactModal({ fb, clientId, onClose, onSaved }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [conversa, setConversa] = useState("");
   const [status, setStatus] = useState("novo");
+  const [source, setSource] = useState("whatsapp");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -1440,7 +1450,7 @@ function NewContactModal({ fb, clientId, onClose, onSaved }) {
         {
           phone: cleanPhone,
           name: name || cleanPhone,
-          source: "manual",
+          source,
           status,
           lastMessage: conversa || "—",
           lastMessageAt: serverTimestamp(),
@@ -1455,7 +1465,7 @@ function NewContactModal({ fb, clientId, onClose, onSaved }) {
         const messageRef = doc(messagesRef);
         await setDoc(messageRef, {
           messageType: "text",
-          source: "manual",
+          source,
           text: conversa,
           fromMe: false,
           timestamp: serverTimestamp(),
@@ -1496,6 +1506,20 @@ function NewContactModal({ fb, clientId, onClose, onSaved }) {
         <div className="login-field">
           <label className="login-label">Conversa / observação inicial</label>
           <textarea className="modal-textarea" value={conversa} onChange={(e) => setConversa(e.target.value)} />
+        </div>
+
+        <div className="login-field">
+          <label className="login-label">Origem</label>
+          <select
+            className="login-input"
+            value={source}
+            onChange={(e) => setSource(e.target.value)}
+            style={{ cursor: "pointer" }}
+          >
+            {Object.entries(SOURCE_LABELS).map(([key, label]) => (
+              <option key={key} value={key}>{label}</option>
+            ))}
+          </select>
         </div>
 
         <div className="login-field">
@@ -1662,9 +1686,6 @@ function ZapiConnect({ fb }) {
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState(null);
-  const [importError, setImportError] = useState("");
   const pollRef = useRef(null);
 
   // Ao abrir a tela, checa se já tem uma instância configurada e o status atual.
@@ -1735,21 +1756,6 @@ function ZapiConnect({ fb }) {
     }
   }
 
-  async function handleImportHistory() {
-    setImportError("");
-    setImportResult(null);
-    setImporting(true);
-    try {
-      const data = await callZapiFunction(fb, "wcrmZapiImportHistory");
-      setImportResult(data);
-    } catch (err) {
-      console.error("Erro ao importar histórico:", err);
-      setImportError(err.message || "Não consegui importar o histórico.");
-    } finally {
-      setImporting(false);
-    }
-  }
-
   return (
     <div className="zapi-connect">
       {connected && (
@@ -1785,11 +1791,11 @@ function ZapiConnect({ fb }) {
       )}
 
       {connected && (
-        <p style={{ fontSize: "13px", color: "var(--muted)" }}>
-          Seu WhatsApp está conectado ao Trilha. As próximas mensagens já vão aparecer no Relatório automaticamente.
-          Conversas de antes de conectar não são importadas automaticamente — se quiser trazer um lead antigo,
-          cadastra ele manualmente no Relatório.
-        </p>
+        <React.Fragment>
+          <p style={{ fontSize: "13px", color: "var(--muted)" }}>
+            Seu WhatsApp está conectado ao Trilha. As próximas mensagens já vão aparecer no Relatório automaticamente.
+          </p>
+        </React.Fragment>
       )}
     </div>
   );
