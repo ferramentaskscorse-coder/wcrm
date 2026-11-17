@@ -444,10 +444,10 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 40px;
-    gap: 28px;
+    align-items: stretch;
+    justify-content: flex-start;
+    padding: 32px 40px;
+    gap: 32px;
   }
   .overview-title {
     font-family: 'Fraunces', serif;
@@ -458,9 +458,12 @@
   }
   .overview-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(140px, 1fr));
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(130px, 1fr);
     gap: 14px;
     align-items: start;
+    overflow-x: auto;
+    padding-bottom: 4px;
   }
   .stat-cell {
     display: flex;
@@ -471,8 +474,8 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 12px;
-    padding: 18px 22px;
-    min-width: 140px;
+    padding: 18px 20px;
+    min-width: 130px;
     border-top: 3px solid var(--stat-color, var(--primary));
   }
   .stat-number {
@@ -929,7 +932,7 @@ const DEFAULT_FUNNEL = [
   { key: "perdido", label: "Perdido", kind: "lost", color: "var(--perdido)" },
 ];
 const STAGE_PALETTE = ["var(--novo)", "var(--em-conversa)", "#5B7DB1", "#8A6FA8", "#B0803A", "var(--convertido)", "var(--perdido)"];
-const HANDLING_LABELS = { call: "Call", mensagem: "Mensagem", audio: "Áudio" };
+const HANDLING_LABELS = { call: "Ligação", mensagem: "Mensagem", audio: "Áudio" };
 
 // Aceita só um funil válido (>=2 etapas, a primeira em andamento, com pelo menos uma "Fechou" e uma "Perdeu").
 function normalizeFunnel(raw) {
@@ -1544,7 +1547,8 @@ function Overview({ contacts, fb, clientId }) {
           ); })}
         </div>
       </div>
-      <WordCloud contacts={contacts} fb={fb} clientId={clientId} />
+      <ConversionView contacts={contacts} />
+      {/* Nuvem de palavras em stand by (componente WordCloud mantido): <WordCloud contacts={contacts} fb={fb} clientId={clientId} /> */}
       <Timeline contacts={contacts} />
     </div>
   );
@@ -2496,9 +2500,6 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
           <div className={`nav-item${view === "report" ? " active" : ""}`} onClick={() => goToView("report")}>
             <span className="nav-icon">☰</span> Relatório
           </div>
-          <div className={`nav-item${view === "conversion" ? " active" : ""}`} onClick={() => goToView("conversion")}>
-            <span className="nav-icon">%</span> Conversão
-          </div>
           <div className={`nav-item${view === "funnel" ? " active" : ""}`} onClick={() => goToView("funnel")}>
             <span className="nav-icon">⚙</span> Meu funil
           </div>
@@ -2611,21 +2612,6 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
             </div>
             <div className="main-body">
               <Overview contacts={dateFilteredContacts} fb={fb} clientId={clientId} />
-            </div>
-          </React.Fragment>
-        ) : view === "conversion" ? (
-          <React.Fragment>
-            <div className="main-toolbar" style={{ flexDirection: "row", alignItems: "center" }}>
-              <button className="back-btn" onClick={backToMenu}>←</button>
-              <span style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: "16px" }}>Conversão</span>
-              {yearFilter != null && (
-                <span style={{ fontSize: "12px", color: "var(--muted)" }}>
-                  · filtrado por {monthFilter != null ? `${MONTH_NAMES_LONG[monthFilter]}/${yearFilter}` : yearFilter}
-                </span>
-              )}
-            </div>
-            <div className="main-body">
-              <ConversionView contacts={dateFilteredContacts} />
             </div>
           </React.Fragment>
         ) : view === "funnel" ? (
