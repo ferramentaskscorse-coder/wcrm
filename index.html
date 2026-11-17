@@ -387,6 +387,16 @@
   .ai-card-reason { font-size: 12.5px; color: var(--muted); }
   .ai-card-actions { display: flex; gap: 8px; margin-top: 4px; }
   .ai-note { font-size: 12.5px; color: var(--muted); text-align: center; }
+  .ai-pinned {
+    flex: none;
+    max-height: 45%;
+    overflow-y: auto;
+    padding: 14px 28px 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  @media (max-width: 720px) { .ai-pinned { padding: 10px 14px 2px; max-height: 50%; } }
   .field-select {
     font-family: 'IBM Plex Sans', sans-serif;
     font-size: 12px;
@@ -2723,11 +2733,15 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
                 </button>
               </div>
             </div>
+            {(analysisMsg || suggestions.some((sg) => sg.contactId === selectedContact.id)) && (
+              <div className="ai-pinned">
+                {suggestions.filter((sg) => sg.contactId === selectedContact.id).map((sg) => (
+                  <SuggestionCard key={sg.id} suggestion={sg} contact={selectedContact} fb={fb} clientId={clientId} />
+                ))}
+                {analysisMsg && <div className="ai-note">{analysisMsg}</div>}
+              </div>
+            )}
             <div className="messages">
-              {suggestions.filter((sg) => sg.contactId === selectedContact.id).map((sg) => (
-                <SuggestionCard key={sg.id} suggestion={sg} contact={selectedContact} fb={fb} clientId={clientId} />
-              ))}
-              {analysisMsg && <div className="ai-note">{analysisMsg}</div>}
               {messages.map((m) => <MessageBubble key={m.id} message={m} />)}
               <div ref={messagesEndRef} />
             </div>
