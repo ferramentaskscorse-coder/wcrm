@@ -2727,6 +2727,7 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
                 </button>
                 <FieldSelect contact={selectedContact} fb={fb} clientId={clientId} field="handling" placeholder="Condução…"
                   options={Object.entries(HANDLING_LABELS)} />
+                <LeadTempSelect contact={selectedContact} fb={fb} clientId={clientId} />
                 <StatusSelect contact={selectedContact} fb={fb} clientId={clientId} />
                 <button className="close-btn" title="Voltar ao relatório" onClick={closeConversation}>
                   ✕
