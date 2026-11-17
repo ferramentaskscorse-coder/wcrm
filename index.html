@@ -357,6 +357,18 @@
     .back-btn { display: block; }
   }
 
+  .field-select {
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 12px;
+    padding: 6px 9px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text, inherit);
+    cursor: pointer;
+    outline: none;
+    max-width: 150px;
+  }
   .status-select {
     font-family: 'IBM Plex Sans', sans-serif;
     font-size: 12.5px;
@@ -908,19 +920,107 @@ const { useState, useEffect, useMemo, useRef } = React;
 // O clientId agora vem do uid de quem está logado (ver App/useAuth) —
 // cada cliente só acessa os próprios dados automaticamente.
 
-const STATUS_LABELS = {
-  novo: "Novo",
-  em_conversa: "Em conversa",
-  convertido: "Convertido",
-  perdido: "Perdido",
-};
+// <funnel-lib>
+const DEFAULT_FUNNEL = [
+  { key: "novo", label: "Novo", kind: "open", color: "var(--novo)" },
+  { key: "em_conversa", label: "Em conversa", kind: "open", color: "var(--em-conversa)" },
+  { key: "proposta", label: "Proposta enviada", kind: "open", color: "#5B7DB1" },
+  { key: "convertido", label: "Fechou", kind: "won", color: "var(--convertido)" },
+  { key: "perdido", label: "Perdido", kind: "lost", color: "var(--perdido)" },
+];
+const STAGE_PALETTE = ["var(--novo)", "var(--em-conversa)", "#5B7DB1", "#8A6FA8", "#B0803A", "var(--convertido)", "var(--perdido)"];
+const HANDLING_LABELS = { call: "Call", mensagem: "Mensagem", audio: "Áudio" };
 
-const STATUS_COLORS = {
-  novo: "var(--novo)",
-  em_conversa: "var(--em-conversa)",
-  convertido: "var(--convertido)",
-  perdido: "var(--perdido)",
-};
+// Aceita só um funil válido (>=2 etapas, a primeira em andamento, com pelo menos uma "Fechou" e uma "Perdeu").
+function normalizeFunnel(raw) {
+  if (!Array.isArray(raw)) return DEFAULT_FUNNEL;
+  const seen = new Set();
+  const out = [];
+  raw.forEach((s, i) => {
+    const key = String((s && s.key) || "").trim();
+    const label = String((s && s.label) || "").trim();
+    if (!key || !label || seen.has(key)) return;
+    seen.add(key);
+    out.push({
+      key,
+      label,
+      kind: s.kind === "won" || s.kind === "lost" ? s.kind : "open",
+      color: s.color || STAGE_PALETTE[i % STAGE_PALETTE.length],
+    });
+  });
+  const ok = out.length >= 2 && out[0].kind === "open" && out.some((s) => s.kind === "won") && out.some((s) => s.kind === "lost");
+  return ok ? out : DEFAULT_FUNNEL;
+}
+
+// Etapa atual do contato. Contatos antigos só têm "status" — convertemos para o funil da cliente.
+function stageOf(contact, funnel) {
+  if (contact.stage && funnel.some((s) => s.key === contact.stage)) return contact.stage;
+  const legacy = contact.status;
+  if (legacy === "convertido") return (funnel.find((s) => s.kind === "won") || funnel[0]).key;
+  if (legacy === "perdido") return (funnel.find((s) => s.kind === "lost") || funnel[0]).key;
+  if (legacy === "em_conversa") {
+    const open = funnel.filter((s) => s.kind === "open");
+    return (open[1] || open[0] || funnel[0]).key;
+  }
+  return funnel[0].key;
+}
+
+// "status" antigo continua sendo gravado junto, para nada que já lê ele quebrar.
+function legacyStatusFor(key, funnel) {
+  const s = funnel.find((x) => x.key === key);
+  if (!s) return "novo";
+  if (s.kind === "won") return "convertido";
+  if (s.kind === "lost") return "perdido";
+  return funnel[0].key === key ? "novo" : "em_conversa";
+}
+
+function slugifyKey(label, existing) {
+  const base =
+    String(label).toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
+      .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "etapa";
+  let key = base;
+  let n = 2;
+  while (existing.includes(key)) key = base + "_" + n++;
+  return key;
+}
+
+// Leads, fechadas, em andamento, perdidas e conversão (fechou ÷ leads) por grupo.
+function conversionStats(contacts, funnel, groupOf) {
+  const map = new Map();
+  contacts.forEach((c) => {
+    const g = groupOf(c) || "nao_informado";
+    const kind = (funnel.find((s) => s.key === stageOf(c, funnel)) || { kind: "open" }).kind;
+    const r = map.get(g) || { group: g, total: 0, won: 0, lost: 0, open: 0 };
+    r.total += 1;
+    r[kind] += 1;
+    map.set(g, r);
+  });
+  return Array.from(map.values()).map((r) => ({ ...r, rate: r.total ? r.won / r.total : 0 }));
+}
+// </funnel-lib>
+
+const FunnelContext = React.createContext({ funnel: DEFAULT_FUNNEL, offers: [] });
+function useFunnel() { return React.useContext(FunnelContext); }
+
+// Funil e ofertas da cliente ficam no documento dela (clients/{uid}).
+function useClientConfig(fb, clientId) {
+  const [config, setConfig] = useState({ funnel: DEFAULT_FUNNEL, offers: [], custom: false });
+  useEffect(() => {
+    if (!fb || !clientId) return;
+    const { db, collection, doc, onSnapshot } = fb;
+    const ref = doc(collection(db, "clients"), clientId);
+    const unsub = onSnapshot(ref, (snap) => {
+      const d = snap.data() || {};
+      setConfig({
+        funnel: normalizeFunnel(d.funnel),
+        offers: Array.isArray(d.offers) ? d.offers.filter((o) => typeof o === "string" && o.trim()) : [],
+        custom: Array.isArray(d.funnel),
+      });
+    }, (err) => console.error("Erro ao carregar configuração:", err));
+    return () => unsub();
+  }, [fb, clientId]);
+  return config;
+}
 
 const LEAD_TEMP_LABELS = {
   quente: "Quente",
@@ -1014,34 +1114,65 @@ function useMessages(fb, clientId, contactId) {
 }
 
 function StatusSelect({ contact, fb, clientId }) {
-  const status = contact.status || "novo";
+  const { funnel } = useFunnel();
+  const stage = stageOf(contact, funnel);
+  const current = funnel.find((x) => x.key === stage);
 
   function handleChange(e) {
-    const { db, collection, doc, updateDoc } = fb;
+    const { db, collection, doc, updateDoc, serverTimestamp } = fb;
     const contactRef = doc(collection(doc(collection(db, "clients"), clientId), "contacts"), contact.id);
-    updateDoc(contactRef, { status: e.target.value }).catch((err) =>
-      console.error("Erro ao atualizar status:", err)
-    );
+    updateDoc(contactRef, {
+      stage: e.target.value,
+      status: legacyStatusFor(e.target.value, funnel),
+      stageChangedAt: serverTimestamp(),
+    }).catch((err) => console.error("Erro ao atualizar etapa:", err));
   }
 
   return (
     <select
       className="status-select"
-      value={status}
+      value={stage}
       onChange={handleChange}
-      style={{ background: STATUS_COLORS[status] || "var(--muted)" }}
+      style={{ background: current ? current.color : "var(--muted)" }}
     >
-      {Object.entries(STATUS_LABELS).map(([key, label]) => (
-        <option key={key} value={key} style={{ color: "black", background: "white" }}>
-          {label}
+      {funnel.map((st) => (
+        <option key={st.key} value={st.key} style={{ color: "black", background: "white" }}>
+          {st.label}
         </option>
       ))}
     </select>
   );
 }
 
+// Seletor simples para um campo de texto do contato (forma de condução, oferta).
+function FieldSelect({ contact, fb, clientId, field, options, placeholder }) {
+  function handleChange(e) {
+    e.stopPropagation();
+    const { db, collection, doc, updateDoc } = fb;
+    const contactRef = doc(collection(doc(collection(db, "clients"), clientId), "contacts"), contact.id);
+    updateDoc(contactRef, { [field]: e.target.value || null }).catch((err) =>
+      console.error("Erro ao atualizar " + field + ":", err)
+    );
+  }
+  const value = contact[field] || "";
+  const known = options.some(([v]) => v === value);
+  return (
+    <select
+      className="field-select"
+      value={value}
+      onClick={(e) => e.stopPropagation()}
+      onChange={handleChange}
+    >
+      <option value="">{placeholder}</option>
+      {options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+      {value && !known && <option value={value}>{value}</option>}
+    </select>
+  );
+}
+
 function ContactRow({ contact, selected, onClick }) {
-  const status = contact.status || "novo";
+  const { funnel } = useFunnel();
+  const isNewStage = stageOf(contact, funnel) === funnel[0].key;
   const time = formatRelativeTime(toDate(contact.lastMessageAt));
 
   return (
@@ -1054,7 +1185,7 @@ function ContactRow({ contact, selected, onClick }) {
         </div>
         <div className="contact-preview">{contact.lastMessage || "—"}</div>
       </div>
-      {status === "novo" && <div className="pulse-dot" title="Novo contato" />}
+      {isNewStage && <div className="pulse-dot" title="Novo contato" />}
     </div>
   );
 }
@@ -1369,16 +1500,15 @@ function WordCloud({ contacts, fb, clientId }) {
 }
 
 function Overview({ contacts, fb, clientId }) {
+  const { funnel } = useFunnel();
   const [expanded, setExpanded] = useState(null);
 
   const grouped = useMemo(() => {
-    const base = { novo: [], em_conversa: [], convertido: [], perdido: [] };
-    contacts.forEach((c) => {
-      const status = c.status || "novo";
-      if (base[status]) base[status].push(c);
-    });
+    const base = {};
+    funnel.forEach((st) => { base[st.key] = []; });
+    contacts.forEach((c) => { base[stageOf(c, funnel)].push(c); });
     return base;
-  }, [contacts]);
+  }, [contacts, funnel]);
 
   function toggle(key) {
     if (grouped[key].length === 0) return;
@@ -1389,16 +1519,16 @@ function Overview({ contacts, fb, clientId }) {
     <div className="overview">
       <div>
         <div className="overview-grid">
-          {Object.entries(STATUS_LABELS).map(([key, label]) => (
+          {funnel.map((st) => { const key = st.key; return (
             <div className="stat-cell" key={key}>
               <div
                 className="stat-card"
-                style={{ "--stat-color": STATUS_COLORS[key], cursor: grouped[key].length ? "pointer" : "default" }}
+                style={{ "--stat-color": st.color, cursor: grouped[key].length ? "pointer" : "default" }}
                 onClick={() => toggle(key)}
                 title={grouped[key].length ? "Clique pra ver quem são" : ""}
               >
                 <div className="stat-number">{grouped[key].length}</div>
-                <div className="stat-label">{label}</div>
+                <div className="stat-label">{st.label}</div>
               </div>
               {expanded === key && (
                 <div className="status-expand">
@@ -1411,7 +1541,7 @@ function Overview({ contacts, fb, clientId }) {
                 </div>
               )}
             </div>
-          ))}
+          ); })}
         </div>
       </div>
       <WordCloud contacts={contacts} fb={fb} clientId={clientId} />
@@ -1430,10 +1560,11 @@ const SOURCE_LABELS = {
 };
 
 function NewContactModal({ fb, clientId, onClose, onSaved }) {
+  const { funnel } = useFunnel();
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [conversa, setConversa] = useState("");
-  const [status, setStatus] = useState("novo");
+  const [stage, setStage] = useState(funnel[0].key);
   const [source, setSource] = useState("whatsapp");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -1459,7 +1590,8 @@ function NewContactModal({ fb, clientId, onClose, onSaved }) {
           phone: cleanPhone,
           name: name || cleanPhone,
           source,
-          status,
+          stage,
+          status: legacyStatusFor(stage, funnel),
           lastMessage: conversa || "—",
           lastMessageAt: serverTimestamp(),
           createdAt: serverTimestamp(),
@@ -1531,15 +1663,15 @@ function NewContactModal({ fb, clientId, onClose, onSaved }) {
         </div>
 
         <div className="login-field">
-          <label className="login-label">Status</label>
+          <label className="login-label">Etapa</label>
           <select
             className="login-input"
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
+            value={stage}
+            onChange={(e) => setStage(e.target.value)}
             style={{ cursor: "pointer" }}
           >
-            {Object.entries(STATUS_LABELS).map(([key, label]) => (
-              <option key={key} value={key}>{label}</option>
+            {funnel.map((st) => (
+              <option key={st.key} value={st.key}>{st.label}</option>
             ))}
           </select>
         </div>
@@ -1623,6 +1755,7 @@ function NotesCell({ contact, fb, clientId }) {
 }
 
 function ReportTable({ contacts, onSelect, fb, clientId }) {
+  const { funnel, offers } = useFunnel();
   if (contacts.length === 0) {
     return <div className="empty-list">Nenhum contato encontrado com esse filtro.</div>;
   }
@@ -1635,14 +1768,17 @@ function ReportTable({ contacts, onSelect, fb, clientId }) {
             <th>Nome</th>
             <th>Telefone</th>
             <th>Data de contato</th>
-            <th>Status</th>
+            <th>Etapa</th>
             <th>Status do lead</th>
+            {offers.length > 0 && <th>Oferta</th>}
+            <th>Condução</th>
             <th>Observações</th>
           </tr>
         </thead>
         <tbody>
           {contacts.map((c) => {
-            const status = c.status || "novo";
+            const stageKey = stageOf(c, funnel);
+            const stageObj = funnel.find((x) => x.key === stageKey);
             return (
               <tr key={c.id} className="report-row" onClick={() => onSelect(c.id)}>
                 <td>
@@ -1656,12 +1792,22 @@ function ReportTable({ contacts, onSelect, fb, clientId }) {
                 <td className="report-phone-cell">{c.phone}</td>
                 <td className="report-date-cell">{formatDateShort(toDate(c.createdAt) || toDate(c.lastMessageAt))}</td>
                 <td>
-                  <span className="status-pill-small" style={{ background: STATUS_COLORS[status] }}>
-                    {STATUS_LABELS[status]}
+                  <span className="status-pill-small" style={{ background: stageObj.color }}>
+                    {stageObj.label}
                   </span>
                 </td>
                 <td>
                   <LeadTempSelect contact={c} fb={fb} clientId={clientId} />
+                </td>
+                {offers.length > 0 && (
+                  <td>
+                    <FieldSelect contact={c} fb={fb} clientId={clientId} field="offer" placeholder="—"
+                      options={offers.map((o) => [o, o])} />
+                  </td>
+                )}
+                <td>
+                  <FieldSelect contact={c} fb={fb} clientId={clientId} field="handling" placeholder="—"
+                    options={Object.entries(HANDLING_LABELS)} />
                 </td>
                 <td style={{ minWidth: "180px" }}>
                   <NotesCell contact={c} fb={fb} clientId={clientId} />
@@ -2043,6 +2189,201 @@ function AdminPanel({ fb }) {
   );
 }
 
+function StatsTable({ rows, labelOf, firstColLabel }) {
+  const total = rows.reduce((a, r) => ({ total: a.total + r.total, won: a.won + r.won, lost: a.lost + r.lost, open: a.open + r.open }), { total: 0, won: 0, lost: 0, open: 0 });
+  const totalRate = total.total ? total.won / total.total : 0;
+  const pct = (x) => (x * 100).toLocaleString("pt-BR", { maximumFractionDigits: 0 }) + "%";
+  return (
+    <div className="report-table-wrap">
+      <table className="report-table">
+        <thead>
+          <tr>
+            <th>{firstColLabel}</th><th>Leads</th><th>Em andamento</th><th>Fechou</th><th>Perdeu</th><th>Conversão</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.group}>
+              <td>{labelOf(r.group)}</td>
+              <td>{r.total}</td>
+              <td>{r.open}</td>
+              <td>{r.won}</td>
+              <td>{r.lost}</td>
+              <td>
+                <strong>{pct(r.rate)}</strong>{" "}
+                <span style={{ fontSize: "11px", color: "var(--muted)" }}>
+                  ({r.won} de {r.total}){r.total < 10 ? " · poucas leads" : ""}
+                </span>
+              </td>
+            </tr>
+          ))}
+          <tr>
+            <td><strong>Total</strong></td>
+            <td><strong>{total.total}</strong></td>
+            <td>{total.open}</td>
+            <td>{total.won}</td>
+            <td>{total.lost}</td>
+            <td><strong>{pct(totalRate)}</strong></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ConversionView({ contacts }) {
+  const { funnel, offers } = useFunnel();
+  const [offerFilter, setOfferFilter] = useState("todas");
+
+  const scoped = useMemo(
+    () => (offerFilter === "todas" ? contacts : contacts.filter((c) => (c.offer || "") === offerFilter)),
+    [contacts, offerFilter]
+  );
+  const order = ["call", "mensagem", "audio", "nao_informado"];
+  const byHandling = useMemo(
+    () => conversionStats(scoped, funnel, (c) => c.handling)
+      .sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group)),
+    [scoped, funnel]
+  );
+  const byOffer = useMemo(
+    () => conversionStats(contacts, funnel, (c) => c.offer).sort((a, b) => b.total - a.total),
+    [contacts, funnel]
+  );
+  const handlingLabel = (g) => HANDLING_LABELS[g] || "Não informada";
+  const unmarked = (byHandling.find((r) => r.group === "nao_informado") || { total: 0 }).total;
+
+  if (contacts.length === 0) return <div className="empty-list">Ainda não há contatos nesse período.</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "22px" }}>
+      <div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+          <span style={{ fontFamily: "'Fraunces', serif", fontWeight: 600 }}>Conversão por forma de condução</span>
+          {offers.length > 0 && (
+            <select className="timeline-select" value={offerFilter} onChange={(e) => setOfferFilter(e.target.value)}>
+              <option value="todas">Todas as ofertas</option>
+              {offers.map((o) => <option key={o} value={o}>{o}</option>)}
+            </select>
+          )}
+        </div>
+        <StatsTable rows={byHandling} labelOf={handlingLabel} firstColLabel="Forma de condução" />
+        {unmarked > 0 && (
+          <p style={{ fontSize: "12.5px", color: "var(--muted)", marginTop: 8 }}>
+            {unmarked} lead(s) ainda sem forma de condução. Marque na coluna "Condução" do Relatório para entrarem na conta.
+          </p>
+        )}
+      </div>
+      {offers.length > 0 && (
+        <div>
+          <p style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, marginBottom: 10 }}>Conversão por oferta</p>
+          <StatsTable rows={byOffer} labelOf={(g) => (g === "nao_informado" ? "Sem oferta marcada" : g)} firstColLabel="Oferta" />
+        </div>
+      )}
+      <p style={{ fontSize: "12px", color: "var(--muted)", lineHeight: 1.5 }}>
+        Conversão = leads que fecharam ÷ total de leads. Ela mostra o que aconteceu, não o motivo: quem aceita uma call
+        costuma já ser uma lead mais interessada. Com poucas leads, o número ainda não permite conclusão.
+      </p>
+    </div>
+  );
+}
+
+const KIND_LABELS = { open: "Em andamento", won: "Fechou", lost: "Perdeu" };
+
+function FunnelEditor({ fb, clientId, config }) {
+  const [stages, setStages] = useState(config.funnel);
+  const [offers, setOffers] = useState(config.offers);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [error, setError] = useState("");
+
+  function updateStage(i, patch) { setStages((cur) => cur.map((s, j) => (j === i ? { ...s, ...patch } : s))); }
+  function move(i, d) {
+    setStages((cur) => {
+      const j = i + d;
+      if (j < 0 || j >= cur.length) return cur;
+      const next = cur.slice();
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  }
+  function addStage() {
+    setStages((cur) => {
+      const key = slugifyKey("Nova etapa", cur.map((s) => s.key));
+      const at = Math.max(1, cur.findIndex((s) => s.kind !== "open"));
+      const next = cur.slice();
+      next.splice(at === -1 ? cur.length : at, 0, { key, label: "Nova etapa", kind: "open", color: STAGE_PALETTE[cur.length % STAGE_PALETTE.length] });
+      return next;
+    });
+  }
+
+  async function handleSave() {
+    setError(""); setMsg("");
+    const cleaned = stages.map((s) => ({ ...s, label: s.label.trim() }));
+    if (cleaned.some((s) => !s.label)) return setError("Toda etapa precisa de um nome.");
+    if (cleaned.length < 2) return setError("Mantenha pelo menos 2 etapas.");
+    if (cleaned[0].kind !== "open") return setError("A primeira etapa precisa ser 'Em andamento' (é onde as leads novas entram).");
+    if (!cleaned.some((s) => s.kind === "won")) return setError("Precisa de uma etapa 'Fechou' (venda feita).");
+    if (!cleaned.some((s) => s.kind === "lost")) return setError("Precisa de uma etapa 'Perdeu'.");
+    const cleanOffers = offers.map((o) => o.trim()).filter(Boolean);
+    setSaving(true);
+    try {
+      const { db, collection, doc, setDoc } = fb;
+      await setDoc(doc(collection(db, "clients"), clientId), { funnel: cleaned, offers: cleanOffers }, { merge: true });
+      setMsg("Salvo!");
+    } catch (err) {
+      console.error("Erro ao salvar funil:", err);
+      setError("Não consegui salvar. Tenta de novo.");
+    } finally { setSaving(false); }
+  }
+
+  const small = { padding: "6px 10px", fontSize: "13px" };
+  return (
+    <div style={{ maxWidth: 620 }}>
+      <p style={{ fontSize: "13px", color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+        Defina as etapas do seu funil, na ordem em que a venda acontece. Cada etapa conta como "Em andamento",
+        "Fechou" ou "Perdeu" — é isso que alimenta a tela de Conversão. Contatos de uma etapa removida voltam para a primeira.
+      </p>
+      {stages.map((st, i) => (
+        <div key={st.key} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+          <span style={{ width: 12, height: 12, borderRadius: 999, background: st.color, flex: "none" }} />
+          <input className="login-input" style={{ flex: "1 1 160px", ...small }} value={st.label}
+            onChange={(e) => updateStage(i, { label: e.target.value })} />
+          <select className="login-input" style={{ width: 140, ...small }} value={st.kind}
+            onChange={(e) => updateStage(i, { kind: e.target.value })}>
+            {Object.entries(KIND_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </select>
+          <button type="button" className="modal-btn-secondary" style={small} onClick={() => move(i, -1)} disabled={i === 0}>↑</button>
+          <button type="button" className="modal-btn-secondary" style={small} onClick={() => move(i, 1)} disabled={i === stages.length - 1}>↓</button>
+          <button type="button" className="modal-btn-secondary" style={small} onClick={() => setStages((c) => c.filter((_, j) => j !== i))} disabled={stages.length <= 2}>Remover</button>
+        </div>
+      ))}
+      <button type="button" className="modal-btn-secondary" style={{ ...small, marginTop: 4 }} onClick={addStage}>+ Adicionar etapa</button>
+
+      <p style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, margin: "26px 0 6px" }}>Ofertas (opcional)</p>
+      <p style={{ fontSize: "12.5px", color: "var(--muted)", marginBottom: 10 }}>
+        Se você vende mais de uma coisa (ex.: "Passeio", "Consultoria"), liste aqui. Aparece uma coluna "Oferta" no Relatório
+        e a conversão passa a ser separada por oferta.
+      </p>
+      {offers.map((o, i) => (
+        <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+          <input className="login-input" style={{ flex: 1, ...small }} value={o}
+            onChange={(e) => setOffers((cur) => cur.map((x, j) => (j === i ? e.target.value : x)))} />
+          <button type="button" className="modal-btn-secondary" style={small} onClick={() => setOffers((c) => c.filter((_, j) => j !== i))}>Remover</button>
+        </div>
+      ))}
+      <button type="button" className="modal-btn-secondary" style={small} onClick={() => setOffers((c) => [...c, ""])}>+ Adicionar oferta</button>
+
+      {error && <p className="login-error" style={{ marginTop: 14 }}>{error}</p>}
+      {msg && <p style={{ color: "var(--primary)", fontSize: "13px", marginTop: 14 }}>{msg}</p>}
+      <div style={{ marginTop: 18 }}>
+        <button type="button" className="modal-btn-primary" onClick={handleSave} disabled={saving}>
+          {saving ? "Salvando…" : "Salvar funil"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Dashboard({ fb, clientId, userEmail, onLogout }) {
   const [view, setView] = useState("report"); // 'report' | 'overview'
   const [search, setSearch] = useState("");
@@ -2054,6 +2395,8 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
   const [showNewContact, setShowNewContact] = useState(false);
 
   const { contacts, loading } = useContacts(fb, clientId);
+  const config = useClientConfig(fb, clientId);
+  const { funnel, offers } = config;
   const messages = useMessages(fb, clientId, selectedId);
   const messagesEndRef = useRef(null);
 
@@ -2107,14 +2450,14 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
 
   const filteredContacts = useMemo(() => {
     return dateFilteredContacts.filter((c) => {
-      const matchesStatus = statusFilter === "todos" || (c.status || "novo") === statusFilter;
+      const matchesStatus = statusFilter === "todos" || stageOf(c, funnel) === statusFilter;
       const matchesSearch =
         !search ||
         (c.name || "").toLowerCase().includes(search.toLowerCase()) ||
         (c.phone || "").includes(search);
       return matchesStatus && matchesSearch;
     });
-  }, [dateFilteredContacts, search, statusFilter]);
+  }, [dateFilteredContacts, search, statusFilter, funnel]);
 
   const selectedContact = contacts.find((c) => c.id === selectedId);
 
@@ -2139,6 +2482,7 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
   }
 
   return (
+    <FunnelContext.Provider value={config}>
     <div className="app">
       <div className={`sidebar${mobileShowMain ? " hide-mobile" : ""}`}>
         <div className="sidebar-header">
@@ -2151,6 +2495,12 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
           </div>
           <div className={`nav-item${view === "report" ? " active" : ""}`} onClick={() => goToView("report")}>
             <span className="nav-icon">☰</span> Relatório
+          </div>
+          <div className={`nav-item${view === "conversion" ? " active" : ""}`} onClick={() => goToView("conversion")}>
+            <span className="nav-icon">%</span> Conversão
+          </div>
+          <div className={`nav-item${view === "funnel" ? " active" : ""}`} onClick={() => goToView("funnel")}>
+            <span className="nav-icon">⚙</span> Meu funil
           </div>
           <div className={`nav-item${view === "zapi" ? " active" : ""}`} onClick={() => goToView("zapi")}>
             <span className="nav-icon">⚡</span> Conectar WhatsApp
@@ -2182,6 +2532,8 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
                 </div>
               </div>
               <div className="header-actions">
+                <FieldSelect contact={selectedContact} fb={fb} clientId={clientId} field="handling" placeholder="Condução…"
+                  options={Object.entries(HANDLING_LABELS)} />
                 <StatusSelect contact={selectedContact} fb={fb} clientId={clientId} />
                 <button className="close-btn" title="Voltar ao relatório" onClick={closeConversation}>
                   ✕
@@ -2213,13 +2565,13 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
                 >
                   Todos
                 </div>
-                {Object.entries(STATUS_LABELS).map(([key, label]) => (
+                {funnel.map((st) => (
                   <div
-                    key={key}
-                    className={`filter-pill${statusFilter === key ? " active" : ""}`}
-                    onClick={() => setStatusFilter(key)}
+                    key={st.key}
+                    className={`filter-pill${statusFilter === st.key ? " active" : ""}`}
+                    onClick={() => setStatusFilter(st.key)}
                   >
-                    {label}
+                    {st.label}
                   </div>
                 ))}
               </div>
@@ -2261,6 +2613,31 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
               <Overview contacts={dateFilteredContacts} fb={fb} clientId={clientId} />
             </div>
           </React.Fragment>
+        ) : view === "conversion" ? (
+          <React.Fragment>
+            <div className="main-toolbar" style={{ flexDirection: "row", alignItems: "center" }}>
+              <button className="back-btn" onClick={backToMenu}>←</button>
+              <span style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: "16px" }}>Conversão</span>
+              {yearFilter != null && (
+                <span style={{ fontSize: "12px", color: "var(--muted)" }}>
+                  · filtrado por {monthFilter != null ? `${MONTH_NAMES_LONG[monthFilter]}/${yearFilter}` : yearFilter}
+                </span>
+              )}
+            </div>
+            <div className="main-body">
+              <ConversionView contacts={dateFilteredContacts} />
+            </div>
+          </React.Fragment>
+        ) : view === "funnel" ? (
+          <React.Fragment>
+            <div className="main-toolbar" style={{ flexDirection: "row", alignItems: "center" }}>
+              <button className="back-btn" onClick={backToMenu}>←</button>
+              <span style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: "16px" }}>Meu funil</span>
+            </div>
+            <div className="main-body">
+              <FunnelEditor key={JSON.stringify(config.funnel) + JSON.stringify(config.offers)} fb={fb} clientId={clientId} config={config} />
+            </div>
+          </React.Fragment>
         ) : view === "zapi" ? (
           <React.Fragment>
             <div className="main-toolbar" style={{ flexDirection: "row", alignItems: "center" }}>
@@ -2291,6 +2668,7 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
         />
       )}
     </div>
+    </FunnelContext.Provider>
   );
 }
 
