@@ -357,6 +357,36 @@
     .back-btn { display: block; }
   }
 
+  .ai-btn {
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 7px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--primary);
+    background: var(--surface);
+    color: var(--primary);
+    cursor: pointer;
+  }
+  .ai-btn:disabled { opacity: 0.6; cursor: default; }
+  .ai-card {
+    background: var(--surface);
+    border: 1px solid var(--primary);
+    border-radius: 12px;
+    padding: 14px 16px;
+    font-size: 13.5px;
+    line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .ai-card-title { font-family: 'Fraunces', serif; font-weight: 600; color: var(--primary); }
+  .ai-card-conf { font-family: 'IBM Plex Sans', sans-serif; font-weight: 400; font-size: 11px; color: var(--muted); margin-left: 6px; }
+  .ai-card-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .ai-card-label { width: 96px; flex: none; color: var(--muted); font-size: 12.5px; }
+  .ai-card-reason { font-size: 12.5px; color: var(--muted); }
+  .ai-card-actions { display: flex; gap: 8px; margin-top: 4px; }
+  .ai-note { font-size: 12.5px; color: var(--muted); text-align: center; }
   .field-select {
     font-family: 'IBM Plex Sans', sans-serif;
     font-size: 12px;
@@ -1000,6 +1030,40 @@ function conversionStats(contacts, funnel, groupOf) {
   });
   return Array.from(map.values()).map((r) => ({ ...r, rate: r.total ? r.won / r.total : 0 }));
 }
+
+function tsMs(v) {
+  if (!v) return 0;
+  if (typeof v.toMillis === "function") return v.toMillis();
+  if (v instanceof Date) return v.getTime();
+  const n = new Date(v).getTime();
+  return Number.isNaN(n) ? 0 : n;
+}
+
+// Analisar sozinha ao abrir a conversa? Só se a cliente ligou a opção, não há sugestão pendente
+// e chegou mensagem depois da última análise.
+function shouldAutoAnalyze(contact, opts) {
+  if (!opts.enabled || !contact || opts.hasPending) return false;
+  const last = tsMs(contact.lastMessageAt);
+  if (!last) return false;
+  const analyzed = tsMs(contact.lastAnalyzedAt);
+  return !(analyzed && analyzed >= last);
+}
+
+// O que gravar no contato quando a dona aplica uma sugestão da IA. "ts" = carimbo de data (serverTimestamp).
+function suggestionPatch(proposed, contact, funnel, ts) {
+  const p = proposed || {};
+  const patch = {};
+  if (p.stage && funnel.some((s) => s.key === p.stage)) {
+    patch.stage = p.stage;
+    patch.status = legacyStatusFor(p.stage, funnel);
+    patch.stageChangedAt = ts;
+  }
+  if (p.temperature) patch.leadTemperature = p.temperature;
+  if (p.handling) patch.handling = p.handling;
+  if (p.offer) patch.offer = p.offer;
+  if (p.note) patch.notes = contact.notes ? contact.notes + " · " + p.note : p.note;
+  return patch;
+}
 // </funnel-lib>
 
 const FunnelContext = React.createContext({ funnel: DEFAULT_FUNNEL, offers: [] });
@@ -1007,7 +1071,7 @@ function useFunnel() { return React.useContext(FunnelContext); }
 
 // Funil e ofertas da cliente ficam no documento dela (clients/{uid}).
 function useClientConfig(fb, clientId) {
-  const [config, setConfig] = useState({ funnel: DEFAULT_FUNNEL, offers: [], custom: false });
+  const [config, setConfig] = useState({ funnel: DEFAULT_FUNNEL, offers: [], custom: false, autoAnalyze: false });
   useEffect(() => {
     if (!fb || !clientId) return;
     const { db, collection, doc, onSnapshot } = fb;
@@ -1018,6 +1082,7 @@ function useClientConfig(fb, clientId) {
         funnel: normalizeFunnel(d.funnel),
         offers: Array.isArray(d.offers) ? d.offers.filter((o) => typeof o === "string" && o.trim()) : [],
         custom: Array.isArray(d.funnel),
+        autoAnalyze: !!d.autoAnalyze,
       });
     }, (err) => console.error("Erro ao carregar configuração:", err));
     return () => unsub();
@@ -2293,6 +2358,7 @@ const KIND_LABELS = { open: "Em andamento", won: "Fechou", lost: "Perdeu" };
 function FunnelEditor({ fb, clientId, config }) {
   const [stages, setStages] = useState(config.funnel);
   const [offers, setOffers] = useState(config.offers);
+  const [autoAnalyze, setAutoAnalyze] = useState(!!config.autoAnalyze);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
@@ -2329,7 +2395,7 @@ function FunnelEditor({ fb, clientId, config }) {
     setSaving(true);
     try {
       const { db, collection, doc, setDoc } = fb;
-      await setDoc(doc(collection(db, "clients"), clientId), { funnel: cleaned, offers: cleanOffers }, { merge: true });
+      await setDoc(doc(collection(db, "clients"), clientId), { funnel: cleaned, offers: cleanOffers, autoAnalyze }, { merge: true });
       setMsg("Salvo!");
     } catch (err) {
       console.error("Erro ao salvar funil:", err);
@@ -2374,12 +2440,95 @@ function FunnelEditor({ fb, clientId, config }) {
       ))}
       <button type="button" className="modal-btn-secondary" style={small} onClick={() => setOffers((c) => [...c, ""])}>+ Adicionar oferta</button>
 
+      <p style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, margin: "26px 0 6px" }}>Análise por IA</p>
+      <label style={{ display: "flex", gap: 10, alignItems: "flex-start", fontSize: "13px", lineHeight: 1.5, cursor: "pointer" }}>
+        <input type="checkbox" checked={autoAnalyze} onChange={(e) => setAutoAnalyze(e.target.checked)} style={{ marginTop: 3 }} />
+        <span>
+          Analisar automaticamente ao abrir uma conversa que tenha mensagens novas.
+          <span style={{ display: "block", color: "var(--muted)", fontSize: "12.5px" }}>
+            A conversa daquele contato é enviada à IA (sem nome nem telefone) só quando você abre. A IA apenas sugere; nada muda sem você aprovar.
+            Desligado, você analisa quando quiser pelo botão "Analisar com IA".
+          </span>
+        </span>
+      </label>
+
       {error && <p className="login-error" style={{ marginTop: 14 }}>{error}</p>}
       {msg && <p style={{ color: "var(--primary)", fontSize: "13px", marginTop: 14 }}>{msg}</p>}
       <div style={{ marginTop: 18 }}>
         <button type="button" className="modal-btn-primary" onClick={handleSave} disabled={saving}>
           {saving ? "Salvando…" : "Salvar funil"}
         </button>
+      </div>
+    </div>
+  );
+}
+
+// Sugestões da IA ainda sem decisão (a dona aprova ou ignora).
+function useSuggestions(fb, clientId) {
+  const [list, setList] = useState([]);
+  useEffect(() => {
+    if (!fb || !clientId) return;
+    const { db, collection, doc, query, where, onSnapshot } = fb;
+    const ref = collection(doc(collection(db, "clients"), clientId), "suggestions");
+    const unsub = onSnapshot(query(ref, where("status", "==", "pending")),
+      (snap) => setList(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => console.error("Erro ao carregar sugestões:", err));
+    return () => unsub();
+  }, [fb, clientId]);
+  return list;
+}
+
+function SuggestionCard({ suggestion, contact, fb, clientId }) {
+  const { funnel } = useFunnel();
+  const [busy, setBusy] = useState(false);
+  const p = suggestion.proposed || {};
+  const cur = suggestion.current || {};
+  const stageLabel = (k) => (funnel.find((x) => x.key === k) || {}).label || "—";
+  const rows = [];
+  if (p.stage) rows.push(["Etapa", stageLabel(cur.stage), stageLabel(p.stage)]);
+  if (p.temperature) rows.push(["Temperatura", LEAD_TEMP_LABELS[cur.temperature] || "—", LEAD_TEMP_LABELS[p.temperature]]);
+  if (p.handling) rows.push(["Condução", HANDLING_LABELS[cur.handling] || "—", HANDLING_LABELS[p.handling]]);
+  if (p.offer) rows.push(["Oferta", cur.offer || "—", p.offer]);
+
+  async function decide(approve) {
+    setBusy(true);
+    try {
+      const { db, collection, doc, updateDoc, serverTimestamp } = fb;
+      const clientRef = doc(collection(db, "clients"), clientId);
+      if (approve) {
+        const contactRef = doc(collection(clientRef, "contacts"), contact.id);
+        await updateDoc(contactRef, suggestionPatch(p, contact, funnel, serverTimestamp()));
+      }
+      await updateDoc(doc(collection(clientRef, "suggestions"), suggestion.id), {
+        status: approve ? "approved" : "rejected",
+        decidedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      console.error("Erro ao decidir sugestão:", err);
+      setBusy(false);
+    }
+  }
+
+  const confidenceLabel = { alta: "confiança alta", media: "confiança média", baixa: "confiança baixa" }[suggestion.confidence] || "";
+  return (
+    <div className="ai-card">
+      <div className="ai-card-title">✨ Sugestão da IA <span className="ai-card-conf">{confidenceLabel}</span></div>
+      {rows.map(([label, from, to]) => (
+        <div key={label} className="ai-card-row">
+          <span className="ai-card-label">{label}</span>
+          <span>{from} <span style={{ color: "var(--muted)" }}>→</span> <strong>{to}</strong></span>
+        </div>
+      ))}
+      {p.note && (
+        <div className="ai-card-row">
+          <span className="ai-card-label">Observação</span>
+          <span>{p.note}</span>
+        </div>
+      )}
+      {suggestion.reason && <div className="ai-card-reason">Por quê: {suggestion.reason}</div>}
+      <div className="ai-card-actions">
+        <button className="modal-btn-primary" style={{ padding: "7px 16px", fontSize: "13px" }} disabled={busy} onClick={() => decide(true)}>Aplicar</button>
+        <button className="modal-btn-secondary" style={{ padding: "7px 16px", fontSize: "13px" }} disabled={busy} onClick={() => decide(false)}>Ignorar</button>
       </div>
     </div>
   );
@@ -2399,6 +2548,25 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
   const config = useClientConfig(fb, clientId);
   const { funnel, offers } = config;
   const messages = useMessages(fb, clientId, selectedId);
+  const suggestions = useSuggestions(fb, clientId);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysisMsg, setAnalysisMsg] = useState("");
+  useEffect(() => { setAnalysisMsg(""); }, [selectedId]);
+
+  async function analyzeSelected(opts) {
+    const silent = !!(opts && opts.silent);
+    setAnalyzing(true);
+    setAnalysisMsg("");
+    try {
+      const r = await callZapiFunction(fb, "wcrmAnalyzeContact", { contactId: selectedId });
+      if (!silent) setAnalysisMsg(r.message || "");
+    } catch (err) {
+      console.error("Erro ao analisar:", err);
+      if (!silent) setAnalysisMsg(err.message || "Não consegui analisar agora.");
+    } finally {
+      setAnalyzing(false);
+    }
+  }
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
@@ -2461,6 +2629,20 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
   }, [dateFilteredContacts, search, statusFilter, funnel]);
 
   const selectedContact = contacts.find((c) => c.id === selectedId);
+
+  // Análise automática ao abrir (se a cliente ligou): no máximo uma tentativa por contato e última mensagem.
+  const triedRef = useRef(new Set());
+  const selLast = tsMs(selectedContact && selectedContact.lastMessageAt);
+  const selAnalyzed = tsMs(selectedContact && selectedContact.lastAnalyzedAt);
+  const selHasPending = selectedContact ? suggestions.some((sg) => sg.contactId === selectedContact.id) : false;
+  useEffect(() => {
+    if (!selectedContact || analyzing) return;
+    const key = selectedContact.id + ":" + selLast;
+    if (triedRef.current.has(key)) return;
+    if (!shouldAutoAnalyze(selectedContact, { enabled: config.autoAnalyze, hasPending: selHasPending })) return;
+    triedRef.current.add(key);
+    analyzeSelected({ silent: true });
+  }, [selectedId, selLast, selAnalyzed, selHasPending, config.autoAnalyze]);
 
   function goToView(v) {
     setView(v);
@@ -2530,6 +2712,9 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
                 </div>
               </div>
               <div className="header-actions">
+                <button className="ai-btn" onClick={() => analyzeSelected()} disabled={analyzing} title="A IA lê a conversa e sugere etapa, temperatura e observação. Nada muda sem você aprovar.">
+                  {analyzing ? "Analisando…" : "✨ Analisar com IA"}
+                </button>
                 <FieldSelect contact={selectedContact} fb={fb} clientId={clientId} field="handling" placeholder="Condução…"
                   options={Object.entries(HANDLING_LABELS)} />
                 <StatusSelect contact={selectedContact} fb={fb} clientId={clientId} />
@@ -2539,6 +2724,10 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
               </div>
             </div>
             <div className="messages">
+              {suggestions.filter((sg) => sg.contactId === selectedContact.id).map((sg) => (
+                <SuggestionCard key={sg.id} suggestion={sg} contact={selectedContact} fb={fb} clientId={clientId} />
+              ))}
+              {analysisMsg && <div className="ai-note">{analysisMsg}</div>}
               {messages.map((m) => <MessageBubble key={m.id} message={m} />)}
               <div ref={messagesEndRef} />
             </div>
@@ -2618,7 +2807,7 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
               <span style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: "16px" }}>Meu funil</span>
             </div>
             <div className="main-body">
-              <FunnelEditor key={JSON.stringify(config.funnel) + JSON.stringify(config.offers)} fb={fb} clientId={clientId} config={config} />
+              <FunnelEditor key={JSON.stringify(config.funnel) + JSON.stringify(config.offers) + String(config.autoAnalyze)} fb={fb} clientId={clientId} config={config} />
             </div>
           </React.Fragment>
         ) : view === "zapi" ? (
