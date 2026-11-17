@@ -1116,7 +1116,7 @@ function useMessages(fb, clientId, contactId) {
   return messages;
 }
 
-function StatusSelect({ contact, fb, clientId }) {
+function StatusSelect({ contact, fb, clientId, compact }) {
   const { funnel } = useFunnel();
   const stage = stageOf(contact, funnel);
   const current = funnel.find((x) => x.key === stage);
@@ -1135,8 +1135,9 @@ function StatusSelect({ contact, fb, clientId }) {
     <select
       className="status-select"
       value={stage}
+      onClick={(e) => e.stopPropagation()}
       onChange={handleChange}
-      style={{ background: current ? current.color : "var(--muted)" }}
+      style={{ background: current ? current.color : "var(--muted)", ...(compact ? { fontSize: "11px", padding: "4px 9px" } : {}) }}
     >
       {funnel.map((st) => (
         <option key={st.key} value={st.key} style={{ color: "black", background: "white" }}>
@@ -1781,8 +1782,6 @@ function ReportTable({ contacts, onSelect, fb, clientId }) {
         </thead>
         <tbody>
           {contacts.map((c) => {
-            const stageKey = stageOf(c, funnel);
-            const stageObj = funnel.find((x) => x.key === stageKey);
             return (
               <tr key={c.id} className="report-row" onClick={() => onSelect(c.id)}>
                 <td>
@@ -1796,9 +1795,7 @@ function ReportTable({ contacts, onSelect, fb, clientId }) {
                 <td className="report-phone-cell">{c.phone}</td>
                 <td className="report-date-cell">{formatDateShort(toDate(c.createdAt) || toDate(c.lastMessageAt))}</td>
                 <td>
-                  <span className="status-pill-small" style={{ background: stageObj.color }}>
-                    {stageObj.label}
-                  </span>
+                  <StatusSelect contact={c} fb={fb} clientId={clientId} compact />
                 </td>
                 <td>
                   <LeadTempSelect contact={c} fb={fb} clientId={clientId} />
