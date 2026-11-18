@@ -1074,6 +1074,89 @@ function suggestionPatch(proposed, contact, funnel, ts) {
   if (p.note) patch.notes = contact.notes ? contact.notes + " · " + p.note : p.note;
   return patch;
 }
+
+// ---- Importar conversa exportada do WhatsApp (.txt) ----
+// Android: "17/11/2026 13:49 - Nome: texto"   iPhone: "[17/11/2026 13:49:05] Nome: texto"
+const EXPORT_HEADER = /^\[?(\d{1,2})\/(\d{1,2})\/(\d{2,4}),?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*([ap])\.?\s?m\.?)?\]?\s*(?:[-–]\s*)?([\s\S]*)$/i;
+
+function parseWhatsAppExport(raw) {
+  const text = String(raw || "")
+    .replace(/[‎‏‪-‮⁦-⁩﻿]/g, "")
+    .replace(/[  ]/g, " ");
+  const found = [];
+  let cur = null;
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(EXPORT_HEADER);
+    let ok = false;
+    if (m) {
+      const day = +m[1], month = +m[2];
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        ok = true;
+        const year = m[3].length === 2 ? 2000 + +m[3] : +m[3];
+        let hour = +m[4];
+        if (m[7]) {
+          const pm = m[7].toLowerCase() === "p";
+          if (pm && hour < 12) hour += 12;
+          if (!pm && hour === 12) hour = 0;
+        }
+        const when = new Date(year, month - 1, day, hour, +m[5], +(m[6] || 0)).getTime();
+        const sm = m[8].match(/^([^:\n]{1,40}): ([\s\S]*)$/);
+        if (sm) { cur = { ts: when, sender: sm[1].trim(), text: sm[2] }; found.push(cur); }
+        else cur = null; // linha de sistema (criptografia, entrou no grupo…)
+      }
+    }
+    if (!ok && cur) cur.text += "\n" + line;
+  }
+  const messages = [];
+  for (const f of found) {
+    let t = f.text.replace(/<\s*(mensagem editada|this message was edited)\s*>/gi, "").trim();
+    if (!t) continue;
+    if (/^(mensagem apagada|você apagou esta mensagem|esta mensagem foi apagada|this message was deleted|you deleted this message)\.?$/i.test(t)) continue;
+    if (/criptografia de ponta a ponta|end-to-end encrypted/i.test(t)) continue;
+    if (/^<?\s*(m[ií]dia oculta|media omitted)\s*>?$/i.test(t)) t = "[mídia]";
+    else if (/([aá]udio (ocultado|omitido))|audio omitted|PTT-\S+.*\(arquivo anexado\)|\.opus/i.test(t)) t = "🎤 Áudio";
+    else if (/imagem (ocultada|omitida)|image omitted|^IMG-\S+/i.test(t)) t = "[imagem]";
+    else if (/v[ií]deo (ocultado|omitido)|video omitted|^VID-\S+/i.test(t)) t = "[vídeo]";
+    else if (/figurinha (ocultada|omitida)|sticker omitted/i.test(t)) t = "[figurinha]";
+    else if (/documento (ocultado|omitido)|document omitted|\(arquivo anexado\)\s*$/i.test(t)) t = "[documento]";
+    messages.push({ ts: f.ts, sender: f.sender, text: t });
+  }
+  const senders = [];
+  messages.forEach((x) => { if (!senders.includes(x.sender)) senders.push(x.sender); });
+  return { messages, senders };
+}
+
+// Id estável: importar o mesmo arquivo de novo regrava as mesmas mensagens, sem duplicar.
+function importMessageId(m, n) {
+  let h = 0x811c9dc5;
+  const s = m.ts + "|" + m.sender + "|" + m.text;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return "imp" + m.ts.toString(36) + "-" + h.toString(16) + (n > 1 ? "-" + n : "");
+}
+
+// meSender = o nome (no arquivo) de quem é a vendedora. firstExistingMs = a mensagem mais antiga que o Trilha
+// já capturou: só importamos o que veio ANTES dela (evita duplicar). max = teto de mensagens (as mais recentes).
+function buildImport(parsed, meSender, opts) {
+  const o = opts || {};
+  const seen = {};
+  let items = parsed.messages.map((m) => {
+    const key = m.ts + "|" + m.sender + "|" + m.text;
+    seen[key] = (seen[key] || 0) + 1;
+    return { id: importMessageId(m, seen[key]), ts: m.ts, fromMe: m.sender === meSender, text: m.text };
+  });
+  const total = items.length;
+  if (o.firstExistingMs) items = items.filter((it) => it.ts < o.firstExistingMs);
+  const alreadyThere = total - items.length;
+  let cut = 0;
+  if (o.max && items.length > o.max) { cut = items.length - o.max; items = items.slice(cut); }
+  return {
+    items,
+    alreadyThere,
+    cut,
+    firstMs: items.length ? items[0].ts : null,
+    lastMs: items.length ? items[items.length - 1].ts : null,
+  };
+}
 // </funnel-lib>
 
 const FunnelContext = React.createContext({ funnel: DEFAULT_FUNNEL, offers: [] });
@@ -1765,6 +1848,106 @@ function NewContactModal({ fb, clientId, onClose, onSaved }) {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+// Importa o histórico de uma conversa exportada do WhatsApp ("Exportar conversa" → sem mídia → arquivo .txt).
+function ImportModal({ fb, clientId, contact, existing, parsed, fileName, onClose, onDone }) {
+  const contactFirst = (contact.name || "").trim().split(/\s+/)[0].toLowerCase();
+  const guessLead = parsed.senders.find((s) => contactFirst && s.toLowerCase().includes(contactFirst));
+  const guessMe = parsed.senders.find((s) => s !== guessLead) || "";
+  const [me, setMe] = useState(guessLead ? guessMe : "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [progress, setProgress] = useState(0);
+
+  const firstExistingMs = useMemo(() => {
+    const times = existing.filter((m) => !m.imported).map((m) => tsMs(m.timestamp)).filter(Boolean);
+    return times.length ? Math.min(...times) : null;
+  }, [existing]);
+  const plan = useMemo(() => buildImport(parsed, me, { firstExistingMs, max: 1000 }), [parsed, me, firstExistingMs]);
+  const fmt = (ms) => new Date(ms).toLocaleDateString("pt-BR");
+
+  async function handleImport() {
+    if (!me) { setError("Escolha qual dos nomes é você."); return; }
+    if (!plan.items.length) { setError("Não há mensagens novas para importar."); return; }
+    setBusy(true); setError("");
+    try {
+      const { db, collection, doc, setDoc, updateDoc } = fb;
+      const contactRef = doc(collection(doc(collection(db, "clients"), clientId), "contacts"), contact.id);
+      const messagesRef = collection(contactRef, "messages");
+      for (let i = 0; i < plan.items.length; i += 20) {
+        await Promise.all(plan.items.slice(i, i + 20).map((it) =>
+          setDoc(doc(messagesRef, it.id), {
+            messageType: "text", source: "whatsapp", channel: "import", imported: true,
+            fromMe: it.fromMe, timestamp: new Date(it.ts), messageId: it.id, text: it.text,
+          })
+        ));
+        setProgress(Math.min(i + 20, plan.items.length));
+      }
+      // Ajusta o contato só no que o histórico melhora: a data de início da conversa (se for anterior)
+      // e a última mensagem (se o contato ainda não tinha nenhuma mais recente).
+      const patch = {};
+      const created = tsMs(contact.createdAt);
+      if (!created || plan.firstMs < created) patch.createdAt = new Date(plan.firstMs);
+      const lastKnown = tsMs(contact.lastMessageAt);
+      if (!lastKnown || plan.lastMs > lastKnown) {
+        const last = plan.items[plan.items.length - 1];
+        patch.lastMessage = (last.fromMe ? "Você: " : "") + last.text.slice(0, 120);
+        patch.lastMessageAt = new Date(plan.lastMs);
+        patch.lastMessageFromMe = last.fromMe;
+      }
+      if (Object.keys(patch).length) await updateDoc(contactRef, patch);
+      onDone(`${plan.items.length} mensagens importadas (${fmt(plan.firstMs)} a ${fmt(plan.lastMs)}). Clique em "Analisar com IA" para ela ler o histórico.`);
+    } catch (err) {
+      console.error("Erro ao importar conversa:", err);
+      setError("Não consegui importar tudo. Tente de novo; o que já foi gravado não duplica.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={busy ? undefined : onClose}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+        <p className="modal-title">Importar conversa</p>
+        <p style={{ fontSize: "13px", color: "var(--muted)", lineHeight: 1.5, marginBottom: 14 }}>
+          Arquivo: {fileName}. Encontrei {parsed.messages.length} mensagens de {parsed.senders.length} pessoa(s).
+        </p>
+        {parsed.senders.length === 0 ? (
+          <p className="login-error">Não reconheci mensagens nesse arquivo. Exporte a conversa pelo WhatsApp (Mais → Exportar conversa → Sem mídia) e envie o arquivo .txt.</p>
+        ) : (
+          <React.Fragment>
+            <div className="login-field">
+              <label className="login-label">Qual desses nomes é você?</label>
+              <select className="login-input" value={me} onChange={(e) => setMe(e.target.value)} style={{ cursor: "pointer" }}>
+                <option value="">Escolha…</option>
+                {parsed.senders.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            {me && (
+              <p style={{ fontSize: "13px", lineHeight: 1.5 }}>
+                Vou importar <strong>{plan.items.length}</strong> mensagens
+                {plan.firstMs ? ` (de ${fmt(plan.firstMs)} a ${fmt(plan.lastMs)})` : ""}.
+                {plan.alreadyThere > 0 && ` ${plan.alreadyThere} já estavam no Trilha e foram puladas.`}
+                {plan.cut > 0 && ` Só as ${plan.items.length} mais recentes entram (limite).`}
+              </p>
+            )}
+            <p style={{ fontSize: "12px", color: "var(--muted)", lineHeight: 1.5, marginTop: 10 }}>
+              Áudios e imagens entram só como aviso, sem o conteúdo. Importar o mesmo arquivo de novo não duplica.
+            </p>
+          </React.Fragment>
+        )}
+        {error && <p className="login-error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" className="modal-btn-secondary" onClick={onClose} disabled={busy}>Cancelar</button>
+          {parsed.senders.length > 0 && (
+            <button type="button" className="modal-btn-primary" onClick={handleImport} disabled={busy || !me}>
+              {busy ? `Importando… ${progress}/${plan.items.length}` : "Importar"}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2579,6 +2762,20 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
   }
   const messagesEndRef = useRef(null);
 
+  const importInputRef = useRef(null);
+  const [importing, setImporting] = useState(null); // { parsed, fileName }
+  useEffect(() => { setImporting(null); }, [selectedId]);
+  function handleImportFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) { setAnalysisMsg("Arquivo grande demais (limite 5 MB). Exporte a conversa sem mídia."); return; }
+    const reader = new FileReader();
+    reader.onload = () => setImporting({ parsed: parseWhatsAppExport(String(reader.result || "")), fileName: file.name });
+    reader.onerror = () => setAnalysisMsg("Não consegui ler o arquivo.");
+    reader.readAsText(file);
+  }
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -2725,6 +2922,10 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
                 <button className="ai-btn" onClick={() => analyzeSelected()} disabled={analyzing} title="A IA lê a conversa e sugere etapa, temperatura e observação. Nada muda sem você aprovar.">
                   {analyzing ? "Analisando…" : "✨ Analisar com IA"}
                 </button>
+                <button className="ai-btn" onClick={() => importInputRef.current && importInputRef.current.click()} title="Traz para cá uma conversa antiga: no WhatsApp, abra a conversa → Mais → Exportar conversa → Sem mídia, e escolha o arquivo .txt.">
+                  📎 Importar conversa
+                </button>
+                <input ref={importInputRef} type="file" accept=".txt,text/plain" style={{ display: "none" }} onChange={handleImportFile} />
                 <FieldSelect contact={selectedContact} fb={fb} clientId={clientId} field="handling" placeholder="Condução…"
                   options={Object.entries(HANDLING_LABELS)} />
                 <LeadTempSelect contact={selectedContact} fb={fb} clientId={clientId} />
@@ -2846,6 +3047,18 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
           </React.Fragment>
         )}
       </div>
+      {importing && selectedContact && (
+        <ImportModal
+          fb={fb}
+          clientId={clientId}
+          contact={selectedContact}
+          existing={messages}
+          parsed={importing.parsed}
+          fileName={importing.fileName}
+          onClose={() => setImporting(null)}
+          onDone={(m) => { setImporting(null); setAnalysisMsg(m); }}
+        />
+      )}
       {showNewContact && (
         <NewContactModal
           fb={fb}
