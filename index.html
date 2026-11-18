@@ -1852,54 +1852,104 @@ function NewContactModal({ fb, clientId, onClose, onSaved }) {
   );
 }
 
-// Importa o histórico de uma conversa exportada do WhatsApp ("Exportar conversa" → sem mídia → arquivo .txt).
-function ImportModal({ fb, clientId, contact, existing, parsed, fileName, onClose, onDone }) {
-  const contactFirst = (contact.name || "").trim().split(/\s+/)[0].toLowerCase();
-  const guessLead = parsed.senders.find((s) => contactFirst && s.toLowerCase().includes(contactFirst));
-  const guessMe = parsed.senders.find((s) => s !== guessLead) || "";
-  const [me, setMe] = useState(guessLead ? guessMe : "");
+// Importa uma conversa exportada do WhatsApp ("Exportar conversa" → sem mídia → arquivo .txt).
+// Cria o contato se ele ainda não existe; se já existe (mesmo telefone), só acrescenta o que é mais antigo.
+function normalizePhone(raw) {
+  const d = String(raw || "").replace(/\D/g, "");
+  return d.length === 10 || d.length === 11 ? "55" + d : d; // sem DDI → assume Brasil
+}
+
+function ImportModal({ fb, clientId, contacts, parsed, fileName, onClose, onDone }) {
+  const { funnel } = useFunnel();
+  const [me, setMe] = useState("");
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState(0);
 
-  const firstExistingMs = useMemo(() => {
-    const times = existing.filter((m) => !m.imported).map((m) => tsMs(m.timestamp)).filter(Boolean);
-    return times.length ? Math.min(...times) : null;
-  }, [existing]);
-  const plan = useMemo(() => buildImport(parsed, me, { firstExistingMs, max: 1000 }), [parsed, me, firstExistingMs]);
+  const isGroup = parsed.senders.length > 2;
+  const leadSender = parsed.senders.length === 2 ? parsed.senders.find((s) => s !== me) : "";
+  const meChosen = !!me;
+
+  // Quando a pessoa escolhe quem é ela, o outro nome vira o contato (e, se o nome for um número, o telefone).
+  function chooseMe(value) {
+    setMe(value);
+    const other = parsed.senders.length === 2 ? parsed.senders.find((s) => s !== value) : "";
+    if (other) {
+      setName(other);
+      const digits = other.replace(/\D/g, "");
+      if (digits.length >= 10) setPhone(digits);
+    }
+  }
+
+  const cleanPhone = normalizePhone(phone);
+  const existingContact = cleanPhone ? contacts.find((c) => c.id === cleanPhone || c.phone === cleanPhone) : null;
+  const plan = useMemo(() => buildImport(parsed, me, { max: 1000 }), [parsed, me]);
   const fmt = (ms) => new Date(ms).toLocaleDateString("pt-BR");
 
   async function handleImport() {
-    if (!me) { setError("Escolha qual dos nomes é você."); return; }
-    if (!plan.items.length) { setError("Não há mensagens novas para importar."); return; }
-    setBusy(true); setError("");
+    setError("");
+    if (!me) return setError("Escolha qual dos nomes é você.");
+    if (cleanPhone.length < 10) return setError("Informe o telefone do contato (com DDD).");
+    setBusy(true);
     try {
-      const { db, collection, doc, setDoc, updateDoc } = fb;
-      const contactRef = doc(collection(doc(collection(db, "clients"), clientId), "contacts"), contact.id);
+      const { db, collection, doc, setDoc, updateDoc, getDocs } = fb;
+      const contactRef = doc(collection(doc(collection(db, "clients"), clientId), "contacts"), existingContact ? existingContact.id : cleanPhone);
       const messagesRef = collection(contactRef, "messages");
-      for (let i = 0; i < plan.items.length; i += 20) {
-        await Promise.all(plan.items.slice(i, i + 20).map((it) =>
+
+      // O que o Trilha já capturou desse contato: só entra o que for mais antigo (evita duplicar).
+      let firstExistingMs = null;
+      if (existingContact) {
+        const snap = await getDocs(messagesRef);
+        const times = snap.docs.map((d) => d.data()).filter((m) => !m.imported).map((m) => tsMs(m.timestamp)).filter(Boolean);
+        firstExistingMs = times.length ? Math.min(...times) : null;
+      }
+      const final = buildImport(parsed, me, { firstExistingMs, max: 1000 });
+      if (!final.items.length) { setBusy(false); return setError("Não há mensagens novas para importar (o Trilha já tem tudo isso)."); }
+
+      for (let i = 0; i < final.items.length; i += 20) {
+        await Promise.all(final.items.slice(i, i + 20).map((it) =>
           setDoc(doc(messagesRef, it.id), {
             messageType: "text", source: "whatsapp", channel: "import", imported: true,
             fromMe: it.fromMe, timestamp: new Date(it.ts), messageId: it.id, text: it.text,
           })
         ));
-        setProgress(Math.min(i + 20, plan.items.length));
+        setProgress(Math.min(i + 20, final.items.length));
       }
-      // Ajusta o contato só no que o histórico melhora: a data de início da conversa (se for anterior)
-      // e a última mensagem (se o contato ainda não tinha nenhuma mais recente).
-      const patch = {};
-      const created = tsMs(contact.createdAt);
-      if (!created || plan.firstMs < created) patch.createdAt = new Date(plan.firstMs);
-      const lastKnown = tsMs(contact.lastMessageAt);
-      if (!lastKnown || plan.lastMs > lastKnown) {
-        const last = plan.items[plan.items.length - 1];
-        patch.lastMessage = (last.fromMe ? "Você: " : "") + last.text.slice(0, 120);
-        patch.lastMessageAt = new Date(plan.lastMs);
-        patch.lastMessageFromMe = last.fromMe;
+
+      const last = final.items[final.items.length - 1];
+      const lastFields = {
+        lastMessage: (last.fromMe ? "Você: " : "") + last.text.slice(0, 120),
+        lastMessageAt: new Date(final.lastMs),
+        lastMessageFromMe: last.fromMe,
+      };
+      if (existingContact) {
+        const patch = {};
+        const created = tsMs(existingContact.createdAt);
+        if (!created || final.firstMs < created) patch.createdAt = new Date(final.firstMs);
+        const lastKnown = tsMs(existingContact.lastMessageAt);
+        if (!lastKnown || final.lastMs > lastKnown) Object.assign(patch, lastFields);
+        if (Object.keys(patch).length) await updateDoc(contactRef, patch);
+      } else {
+        // Contato novo. Se a vendedora já respondeu no histórico, ele já nasce "em andamento" (como a regra da 1ª resposta).
+        const open = funnel.filter((st) => st.kind === "open");
+        const answered = final.items.some((it) => it.fromMe);
+        const stage = answered && open[1] ? open[1].key : funnel[0].key;
+        await setDoc(contactRef, {
+          phone: cleanPhone,
+          name: name.trim() || cleanPhone,
+          source: "whatsapp",
+          stage,
+          status: legacyStatusFor(stage, funnel),
+          ...(answered ? { autoMovedAt: new Date() } : {}),
+          ...lastFields,
+          createdAt: new Date(final.firstMs),
+          updatedAt: new Date(),
+        }, { merge: true });
       }
-      if (Object.keys(patch).length) await updateDoc(contactRef, patch);
-      onDone(`${plan.items.length} mensagens importadas (${fmt(plan.firstMs)} a ${fmt(plan.lastMs)}). Clique em "Analisar com IA" para ela ler o histórico.`);
+      const skipped = final.alreadyThere ? ` ${final.alreadyThere} já estavam no Trilha.` : "";
+      onDone(`${final.items.length} mensagens importadas de ${fmt(final.firstMs)} a ${fmt(final.lastMs)}.${skipped} Abra o contato e clique em "Analisar com IA".`, existingContact ? existingContact.id : cleanPhone);
     } catch (err) {
       console.error("Erro ao importar conversa:", err);
       setError("Não consegui importar tudo. Tente de novo; o que já foi gravado não duplica.");
@@ -1916,22 +1966,35 @@ function ImportModal({ fb, clientId, contact, existing, parsed, fileName, onClos
         </p>
         {parsed.senders.length === 0 ? (
           <p className="login-error">Não reconheci mensagens nesse arquivo. Exporte a conversa pelo WhatsApp (Mais → Exportar conversa → Sem mídia) e envie o arquivo .txt.</p>
+        ) : isGroup ? (
+          <p className="login-error">Esse arquivo tem {parsed.senders.length} pessoas, parece uma conversa de grupo. O Trilha importa só conversas entre duas pessoas.</p>
         ) : (
           <React.Fragment>
             <div className="login-field">
               <label className="login-label">Qual desses nomes é você?</label>
-              <select className="login-input" value={me} onChange={(e) => setMe(e.target.value)} style={{ cursor: "pointer" }}>
+              <select className="login-input" value={me} onChange={(e) => chooseMe(e.target.value)} style={{ cursor: "pointer" }}>
                 <option value="">Escolha…</option>
                 {parsed.senders.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
-            {me && (
-              <p style={{ fontSize: "13px", lineHeight: 1.5 }}>
-                Vou importar <strong>{plan.items.length}</strong> mensagens
-                {plan.firstMs ? ` (de ${fmt(plan.firstMs)} a ${fmt(plan.lastMs)})` : ""}.
-                {plan.alreadyThere > 0 && ` ${plan.alreadyThere} já estavam no Trilha e foram puladas.`}
-                {plan.cut > 0 && ` Só as ${plan.items.length} mais recentes entram (limite).`}
-              </p>
+            {meChosen && (
+              <React.Fragment>
+                <div className="login-field">
+                  <label className="login-label">Nome do contato</label>
+                  <input className="login-input" value={name} onChange={(e) => setName(e.target.value)} />
+                </div>
+                <div className="login-field">
+                  <label className="login-label">Telefone do contato (com DDD)</label>
+                  <input className="login-input" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="11 99999-9999" />
+                  <span style={{ fontSize: "11.5px", color: "var(--muted)" }}>O arquivo do WhatsApp não traz o telefone, por isso preciso dele.</span>
+                </div>
+                <p style={{ fontSize: "13px", lineHeight: 1.5 }}>
+                  {existingContact
+                    ? <React.Fragment>Esse contato <strong>já existe</strong> ({existingContact.name || existingContact.phone}). Vou acrescentar as mensagens mais antigas à conversa dele.</React.Fragment>
+                    : <React.Fragment>Vou <strong>criar o contato</strong> e importar <strong>{plan.items.length}</strong> mensagens{plan.firstMs ? ` (de ${fmt(plan.firstMs)} a ${fmt(plan.lastMs)})` : ""}.</React.Fragment>}
+                  {plan.cut > 0 && ` Só as ${plan.items.length} mais recentes entram (limite).`}
+                </p>
+              </React.Fragment>
             )}
             <p style={{ fontSize: "12px", color: "var(--muted)", lineHeight: 1.5, marginTop: 10 }}>
               Áudios e imagens entram só como aviso, sem o conteúdo. Importar o mesmo arquivo de novo não duplica.
@@ -1941,8 +2004,8 @@ function ImportModal({ fb, clientId, contact, existing, parsed, fileName, onClos
         {error && <p className="login-error">{error}</p>}
         <div className="modal-actions">
           <button type="button" className="modal-btn-secondary" onClick={onClose} disabled={busy}>Cancelar</button>
-          {parsed.senders.length > 0 && (
-            <button type="button" className="modal-btn-primary" onClick={handleImport} disabled={busy || !me}>
+          {parsed.senders.length > 0 && !isGroup && (
+            <button type="button" className="modal-btn-primary" onClick={handleImport} disabled={busy || !meChosen}>
               {busy ? `Importando… ${progress}/${plan.items.length}` : "Importar"}
             </button>
           )}
@@ -2744,7 +2807,9 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
   const suggestions = useSuggestions(fb, clientId);
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisMsg, setAnalysisMsg] = useState("");
-  useEffect(() => { setAnalysisMsg(""); }, [selectedId]);
+  const [importNote, setImportNote] = useState("");
+  const [importError, setImportError] = useState("");
+  useEffect(() => { setAnalysisMsg(importNote); setImportNote(""); }, [selectedId]);
 
   async function analyzeSelected(opts) {
     const silent = !!(opts && opts.silent);
@@ -2764,15 +2829,15 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
 
   const importInputRef = useRef(null);
   const [importing, setImporting] = useState(null); // { parsed, fileName }
-  useEffect(() => { setImporting(null); }, [selectedId]);
   function handleImportFile(e) {
     const file = e.target.files && e.target.files[0];
     e.target.value = "";
+    setImportError("");
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) { setAnalysisMsg("Arquivo grande demais (limite 5 MB). Exporte a conversa sem mídia."); return; }
+    if (file.size > 5 * 1024 * 1024) { setImportError("Arquivo grande demais (limite 5 MB). Exporte a conversa sem mídia."); return; }
     const reader = new FileReader();
     reader.onload = () => setImporting({ parsed: parseWhatsAppExport(String(reader.result || "")), fileName: file.name });
-    reader.onerror = () => setAnalysisMsg("Não consegui ler o arquivo.");
+    reader.onerror = () => setImportError("Não consegui ler o arquivo.");
     reader.readAsText(file);
   }
 
@@ -2922,10 +2987,6 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
                 <button className="ai-btn" onClick={() => analyzeSelected()} disabled={analyzing} title="A IA lê a conversa e sugere etapa, temperatura e observação. Nada muda sem você aprovar.">
                   {analyzing ? "Analisando…" : "✨ Analisar com IA"}
                 </button>
-                <button className="ai-btn" onClick={() => importInputRef.current && importInputRef.current.click()} title="Traz para cá uma conversa antiga: no WhatsApp, abra a conversa → Mais → Exportar conversa → Sem mídia, e escolha o arquivo .txt.">
-                  📎 Importar conversa
-                </button>
-                <input ref={importInputRef} type="file" accept=".txt,text/plain" style={{ display: "none" }} onChange={handleImportFile} />
                 <FieldSelect contact={selectedContact} fb={fb} clientId={clientId} field="handling" placeholder="Condução…"
                   options={Object.entries(HANDLING_LABELS)} />
                 <LeadTempSelect contact={selectedContact} fb={fb} clientId={clientId} />
@@ -2953,8 +3014,13 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
             <div className="main-toolbar">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <button className="back-btn" style={{ alignSelf: "flex-start" }} onClick={backToMenu}>←</button>
-                <button className="add-contact-btn" onClick={() => setShowNewContact(true)}>+ Novo contato</button>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="add-contact-btn" onClick={() => importInputRef.current && importInputRef.current.click()} title="Traz uma conversa antiga: no WhatsApp, abra a conversa → Mais → Exportar conversa → Sem mídia, e escolha o arquivo .txt.">📎 Importar conversa</button>
+                  <input ref={importInputRef} type="file" accept=".txt,text/plain" style={{ display: "none" }} onChange={handleImportFile} />
+                  <button className="add-contact-btn" onClick={() => setShowNewContact(true)}>+ Novo contato</button>
+                </div>
               </div>
+              {importError && <p className="login-error" style={{ margin: 0 }}>{importError}</p>}
               <input
                 className="search"
                 placeholder="Buscar por nome ou telefone"
@@ -3047,16 +3113,15 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
           </React.Fragment>
         )}
       </div>
-      {importing && selectedContact && (
+      {importing && (
         <ImportModal
           fb={fb}
           clientId={clientId}
-          contact={selectedContact}
-          existing={messages}
+          contacts={contacts}
           parsed={importing.parsed}
           fileName={importing.fileName}
           onClose={() => setImporting(null)}
-          onDone={(m) => { setImporting(null); setAnalysisMsg(m); }}
+          onDone={(m, contactId) => { setImporting(null); setImportNote(m); setSelectedId(contactId); setMobileShowMain(true); }}
         />
       )}
       {showNewContact && (
