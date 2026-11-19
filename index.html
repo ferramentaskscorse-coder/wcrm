@@ -480,6 +480,22 @@
     gap: 10px;
   }
 
+  .today { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 24px; }
+  .today-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .today-title { font-family: 'Fraunces', serif; font-weight: 600; font-size: 16px; }
+  .today-sub { font-size: 12px; color: var(--muted); }
+  .today-empty { font-size: 13px; color: var(--muted); margin: 6px 0 2px; }
+  .today-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); }
+  .today-rank { flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--border); font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+  .today-main { flex: 1; min-width: 0; cursor: pointer; }
+  .today-name { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .today-temp { color: #fff; font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 999px; }
+  .today-stage { font-size: 11.5px; font-weight: 400; color: var(--muted); }
+  .today-reason { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .today-actions { flex: none; display: flex; gap: 6px; }
+  .today-btn { font-family: inherit; font-size: 12px; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--border); background: transparent; cursor: pointer; color: inherit; }
+  .today-btn:hover { background: var(--border); }
+  @media (max-width: 720px) { .today-row { flex-wrap: wrap; } .today-actions { width: 100%; padding-left: 34px; } }
   .overview {
     flex: 1;
     display: flex;
@@ -1157,6 +1173,73 @@ function buildImport(parsed, meSender, opts) {
     lastMs: items.length ? items[items.length - 1].ts : null,
   };
 }
+// ---- "Hoje": com quem falar agora, da boca do gol para o frio ----
+const TODAY_MAX = 7;
+const DAY_MS = 86400000;
+
+// Devolve até `max` contatos, em ordem de prioridade, cada um com o motivo em uma frase e a condução sugerida.
+// Regras: bola com você · quente parada (2 dias) · quente sem condução · proposta esfriando (3 dias) · morna esquecida (7 dias) · fria (14 dias).
+function todayList(contacts, funnel, now, max) {
+  const limit = max || TODAY_MAX;
+  const open = funnel.filter((st) => st.kind === "open");
+  const proposalKey = open.length ? open[open.length - 1].key : null;
+  const out = [];
+  for (const c of contacts) {
+    const stage = stageOf(c, funnel);
+    const idx = open.findIndex((st) => st.key === stage);
+    if (idx < 0) continue; // fechou ou perdeu: fora
+    const lastMs = tsMs(c.lastMessageAt);
+    if (!lastMs) continue; // sem conversa: nada a dizer
+    const doneMs = tsMs(c.todayDoneAt);
+    if (tsMs(c.snoozedUntil) > now) continue;
+    const temp = c.leadTemperature || "nao_abordado";
+    const idleMs = Math.max(lastMs, doneMs);
+    const idleDays = Math.floor((now - idleMs) / DAY_MS);
+    const waitingMs = now - lastMs;
+    const leadSpokeLast = c.lastMessageFromMe === false && !(doneMs >= lastMs);
+    let reason = null, bonus = 0;
+    if (leadSpokeLast) {
+      reason = "ball"; bonus = 300;
+    } else if (temp === "quente" && idleDays >= 2) {
+      reason = "hot"; bonus = 150;
+    } else if (temp === "quente" && !c.handling) {
+      reason = "nohandling"; bonus = 100;
+    } else if (stage === proposalKey && idx > 0 && idleDays >= 3 && temp !== "frio") {
+      reason = "proposal"; bonus = 200;
+    } else if (temp === "morno" && idleDays >= 7) {
+      reason = "warm"; bonus = 0;
+    } else if (temp === "frio" && idleDays >= 14) {
+      reason = "cold"; bonus = 0;
+    }
+    if (!reason) continue;
+    const base = { quente: 3000, morno: 2000, nao_abordado: 1500, frio: 1000 }[temp] || 1500;
+    out.push({
+      contact: c, reason, idleDays, waitingMs,
+      score: base + idx * 400 + bonus + Math.min(idleDays, 30) * 5,
+    });
+  }
+  out.sort((a, b) => b.score - a.score);
+  return out.slice(0, limit);
+}
+
+function todayAgo(ms) {
+  const h = Math.floor(ms / 3600000);
+  if (h < 1) return "agora há pouco";
+  if (h < 24) return "há " + h + (h === 1 ? " hora" : " horas");
+  const d = Math.floor(h / 24);
+  return "há " + d + (d === 1 ? " dia" : " dias");
+}
+
+function todayReasonText(item) {
+  switch (item.reason) {
+    case "ball": return "Mandou mensagem " + todayAgo(item.waitingMs) + " e espera sua resposta";
+    case "hot": return "Lead quente, sem conversa " + todayAgo(item.idleDays * DAY_MS);
+    case "nohandling": return "Lead quente sem forma de conduzir definida";
+    case "proposal": return "Proposta enviada, sem retorno " + todayAgo(item.idleDays * DAY_MS);
+    case "warm": return "Lead morna esquecida, sem conversa " + todayAgo(item.idleDays * DAY_MS);
+    default: return "Lead fria parada " + todayAgo(item.idleDays * DAY_MS) + ": retomar ou encerrar";
+  }
+}
 // </funnel-lib>
 
 const FunnelContext = React.createContext({ funnel: DEFAULT_FUNNEL, offers: [] });
@@ -1661,7 +1744,56 @@ function WordCloud({ contacts, fb, clientId }) {
   );
 }
 
-function Overview({ contacts, fb, clientId }) {
+function TodayPanel({ contacts, fb, clientId, onOpen }) {
+  const { funnel } = useFunnel();
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 60000); return () => clearInterval(t); }, []);
+  const items = useMemo(() => todayList(contacts, funnel, now), [contacts, funnel, now]);
+
+  function mark(c, patch) {
+    const { db, collection, doc, updateDoc } = fb;
+    const ref = doc(collection(doc(collection(db, "clients"), clientId), "contacts"), c.id);
+    updateDoc(ref, patch).catch((err) => console.error("Erro ao atualizar o Hoje:", err));
+  }
+
+  return (
+    <div className="today">
+      <div className="today-head">
+        <span className="today-title">Hoje: com quem falar</span>
+        <span className="today-sub">Do mais perto de fechar ao mais frio</span>
+      </div>
+      {items.length === 0 ? (
+        <p className="today-empty">Nada urgente agora. Quando uma lead esperar resposta ou esfriar, ela aparece aqui.</p>
+      ) : items.map((it, i) => {
+        const c = it.contact;
+        const temp = c.leadTemperature || "nao_abordado";
+        return (
+          <div className="today-row" key={c.id}>
+            <span className="today-rank">{i + 1}</span>
+            <div className="today-main" onClick={() => onOpen(c.id)} title="Abrir a conversa">
+              <div className="today-name">
+                {c.name || c.phone}
+                <span className="today-temp" style={{ background: LEAD_TEMP_COLORS[temp] }}>{LEAD_TEMP_LABELS[temp]}</span>
+                <span className="today-stage">{stageOf(c, funnel) && (funnel.find((st) => st.key === stageOf(c, funnel)) || {}).label}</span>
+              </div>
+              <div className="today-reason">
+                {todayReasonText(it)}
+                {c.handling && HANDLING_LABELS[c.handling] ? " · sugestão: " + HANDLING_LABELS[c.handling].toLowerCase() : ""}
+              </div>
+            </div>
+            <div className="today-actions">
+              <button className="today-btn" onClick={() => onOpen(c.id)}>Abrir</button>
+              <button className="today-btn" onClick={() => mark(c, { todayDoneAt: new Date() })} title="Já cuidei dessa pessoa">Feito</button>
+              <button className="today-btn" onClick={() => mark(c, { snoozedUntil: new Date(Date.now() + DAY_MS) })} title="Esconde por 1 dia">Adiar</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Overview({ contacts, allContacts, onOpen, fb, clientId }) {
   const { funnel } = useFunnel();
   const [expanded, setExpanded] = useState(null);
 
@@ -1679,6 +1811,7 @@ function Overview({ contacts, fb, clientId }) {
 
   return (
     <div className="overview">
+      <TodayPanel contacts={allContacts || contacts} fb={fb} clientId={clientId} onOpen={onOpen || (() => {})} />
       <div>
         <div className="overview-grid">
           {funnel.map((st) => { const key = st.key; return (
@@ -3079,7 +3212,7 @@ function Dashboard({ fb, clientId, userEmail, onLogout }) {
               )}
             </div>
             <div className="main-body">
-              <Overview contacts={dateFilteredContacts} fb={fb} clientId={clientId} />
+              <Overview contacts={dateFilteredContacts} allContacts={contacts} onOpen={selectContact} fb={fb} clientId={clientId} />
             </div>
           </React.Fragment>
         ) : view === "funnel" ? (
